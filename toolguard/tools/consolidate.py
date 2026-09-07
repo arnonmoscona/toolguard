@@ -41,6 +41,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from toolguard.api import decide
 from toolguard.config import Configuration, Provenance
+from toolguard.constants import DECISION_ALLOW
 from toolguard.patterns import PatternType, parse_pattern
 from toolguard.tools.config_access import (
     LayerRules,
@@ -669,7 +670,7 @@ def _check_family2_safe(
     for cmd in probes:
         va = decide(config, tool, cmd).decision
         vb = decide(config_b, tool, cmd).decision
-        if va != "allow" or vb != "allow":
+        if va != DECISION_ALLOW or vb != DECISION_ALLOW:
             pos_fail += 1
 
     if pos_fail:
@@ -910,8 +911,8 @@ def _broadening_probe_surface(
     surface = [
         cmd
         for cmd in probes
-        if decide(config_b, tool, cmd).decision == "allow"
-        and decide(config_a, tool, cmd).decision != "allow"
+        if decide(config_b, tool, cmd).decision == DECISION_ALLOW
+        and decide(config_a, tool, cmd).decision != DECISION_ALLOW
     ]
     return tuple(surface)
 

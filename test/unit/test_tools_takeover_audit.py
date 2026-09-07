@@ -61,6 +61,7 @@ def _toolguard_layer(
     allow: Optional[List[str]] = None,
     undecidable_fallback: Optional[str] = None,
     provenance: Optional[Provenance] = None,
+    **top_level_fallback_keys: str,
 ) -> ConfigLayer:
     """
     Build a toolguard_hook ConfigLayer with the given settings.
@@ -69,10 +70,15 @@ def _toolguard_layer(
     varies and inherits production's own defaults for everything else. In
     particular ``no_match_fallback`` unset resolves to ``'ask'``, not ``'deny'``.
 
-    ``undecidable_fallback``, when given, is written as a TOP-LEVEL key
-    (sibling of ``takeover_mode``/``governed_tools``), matching its real
-    schema: unlike ``no_match_fallback`` it has no ``[takeover_mode]``
-    section and no legacy alias.
+    ``undecidable_fallback``, when given, is written as a TOP-LEVEL key (sibling
+    of ``takeover_mode``/``governed_tools``), matching its real schema: unlike
+    ``no_match_fallback`` it has no ``[takeover_mode]`` section or legacy alias.
+
+    ``**top_level_fallback_keys`` covers the TOO-28 ``'*_in_auto_mode'`` keys
+    (e.g. ``no_match_fallback_in_auto_mode="allow"``), which share that same
+    top-level, no-alias shape -- a kwarg per key here rather than a named
+    parameter each, since both are the only two callers need today and PLR0913
+    caps this function's positional/keyword parameter count.
     """
     content: dict = {}
 
@@ -93,6 +99,7 @@ def _toolguard_layer(
 
     if undecidable_fallback is not None:
         content["undecidable_fallback"] = undecidable_fallback
+    content.update(top_level_fallback_keys)
 
     if allow:
         content["permissions"] = {
@@ -944,6 +951,144 @@ class TestLooseUndecidableFallback(unittest.TestCase):
         matches = self._matches(self._undecidable_config("allow_with_no_warnings"))
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].severity, AuditSeverity.HIGH)
+
+
+# ---------------------------------------------------------------------------
+# Loose-*-fallback-in-auto-mode (TOO-28)
+# ---------------------------------------------------------------------------
+
+
+class TestLooseFallbackInAutoMode(unittest.TestCase):
+    """
+    Tests for the loose-no-match-fallback-in-auto-mode (LOW) and
+    loose-undecidable-fallback-in-auto-mode (HIGH) invariants.
+
+    audit_takeover() has no Invocation, so these fire on what the auto-mode
+    setting WOULD resolve to, gated on it differing from the (already-reported-
+    separately, if loose) base value -- see the module docstring.
+    """
+
+    def _no_match_matches(self, config: Configuration):
+        return [
+            f
+            for f in audit_takeover(config)
+            if f.finding_id == "loose-no-match-fallback-in-auto-mode"
+        ]
+
+    def _undecidable_matches(self, config: Configuration):
+        return [
+            f
+            for f in audit_takeover(config)
+            if f.finding_id == "loose-undecidable-fallback-in-auto-mode"
+        ]
+
+    def test_strict_base_with_loose_auto_override_is_flagged(self):
+        """
+        Given no_match_fallback='deny' (strict, so the base invariant does
+            NOT fire) AND no_match_fallback_in_auto_mode='allow'
+        When audit_takeover() is called
+        Then a LOW 'loose-no-match-fallback-in-auto-mode' finding IS returned
+            -- exactly the gap invisible to the base invariant alone
+        """
+        config = _make_config(
+            _toolguard_layer(
+                governed_tools=["Bash"],
+                takeover_enabled=True,
+                no_match_fallback="deny",
+                no_match_fallback_in_auto_mode="allow",
+                ignored_allow_patterns=["Bash(*)"],
+            ),
+            _native_layer(allow=["Bash(*)"], hooks=_hooks_for("Bash")),
+        )
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+        matches = self._no_match_matches(config)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, AuditSeverity.LOW)
+
+    def test_unset_auto_override_is_not_flagged_beyond_the_base_finding(self):
+        """
+        Given no_match_fallback='deny' and no_match_fallback_in_auto_mode UNSET
+        When audit_takeover() is called
+        Then no 'loose-no-match-fallback-in-auto-mode' finding is returned --
+            unset defers to the (already strict) base value, so there is
+            nothing new to report
+        """
+        config = _make_config(
+            _toolguard_layer(
+                governed_tools=["Bash"],
+                takeover_enabled=True,
+                no_match_fallback="deny",
+                ignored_allow_patterns=["Bash(*)"],
+            ),
+            _native_layer(allow=["Bash(*)"], hooks=_hooks_for("Bash")),
+        )
+        self.assertEqual(self._no_match_matches(config), [])
+
+    def test_loose_base_with_equally_loose_auto_value_is_not_duplicated(self):
+        """
+        Given no_match_fallback='ask' (loose -- the base invariant DOES fire)
+            and no_match_fallback_in_auto_mode left UNSET, so it resolves to
+            the same 'ask'
+        When audit_takeover() is called
+        Then no 'loose-no-match-fallback-in-auto-mode' finding is returned --
+            the auto value equals the base value, so the auto-mode finding
+            would be a pure duplicate of the base one
+        """
+        config = _make_config(
+            _toolguard_layer(
+                governed_tools=["Bash"],
+                takeover_enabled=True,
+                no_match_fallback="ask",
+                ignored_allow_patterns=["Bash(*)"],
+            ),
+            _native_layer(allow=["Bash(*)"], hooks=_hooks_for("Bash")),
+        )
+        self.assertEqual(self._no_match_matches(config), [])
+        self.assertEqual(len(self._matches_by_id(config, "loose-no-match-fallback")), 1)
+
+    def _matches_by_id(self, config: Configuration, finding_id: str):
+        return [f for f in audit_takeover(config) if f.finding_id == finding_id]
+
+    def test_strict_base_with_loose_auto_undecidable_override_is_flagged(self):
+        """
+        Given undecidable_fallback='deny' (strict) AND
+            undecidable_fallback_in_auto_mode='allow'
+        When audit_takeover() is called
+        Then a HIGH 'loose-undecidable-fallback-in-auto-mode' finding IS
+            returned
+        """
+        config = _make_config(
+            _toolguard_layer(
+                governed_tools=["Bash"],
+                takeover_enabled=True,
+                no_match_fallback="deny",
+                undecidable_fallback="deny",
+                undecidable_fallback_in_auto_mode="allow",
+                ignored_allow_patterns=["Bash(*)"],
+            ),
+            _native_layer(allow=["Bash(*)"], hooks=_hooks_for("Bash")),
+        )
+        matches = self._undecidable_matches(config)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, AuditSeverity.HIGH)
+
+    def test_auto_undecidable_override_set_to_deny_is_not_flagged(self):
+        """
+        Given undecidable_fallback_in_auto_mode='deny' (strict, not loose)
+        When audit_takeover() is called
+        Then no 'loose-undecidable-fallback-in-auto-mode' finding is returned
+        """
+        config = _make_config(
+            _toolguard_layer(
+                governed_tools=["Bash"],
+                takeover_enabled=True,
+                no_match_fallback="deny",
+                undecidable_fallback_in_auto_mode="deny",
+                ignored_allow_patterns=["Bash(*)"],
+            ),
+            _native_layer(allow=["Bash(*)"], hooks=_hooks_for("Bash")),
+        )
+        self.assertEqual(self._undecidable_matches(config), [])
 
 
 # ---------------------------------------------------------------------------

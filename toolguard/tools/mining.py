@@ -31,7 +31,14 @@ from typing import Dict, List, Optional, Tuple
 
 from toolguard.api import decide
 from toolguard.config import Configuration, Provenance
-from toolguard.constants import FILE_TOOLS, STATUS_EXECUTED, STATUS_REFUSED
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    FILE_TOOLS,
+    STATUS_EXECUTED,
+    STATUS_REFUSED,
+)
 from toolguard.parser.command_extractor import extract_commands
 from toolguard.parser.multiline import LeafCommand, extract_structured
 from toolguard.tools.config_access import with_layer_allow_replaced
@@ -59,7 +66,11 @@ _SIGNAL_ORDER = {
 #: Strictness order for a cluster's headline verdict -- higher wins, so a
 #: single deny observed in a cluster is never summarised away by a majority
 #: ask or allow.
-_VERDICT_STRICTNESS: Dict[str, int] = {"allow": 0, "ask": 1, "deny": 2}
+_VERDICT_STRICTNESS: Dict[str, int] = {
+    DECISION_ALLOW: 0,
+    DECISION_ASK: 1,
+    DECISION_DENY: 2,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +239,14 @@ def _classify(current_verdict: str, observed_status: str) -> str:
     """
     if observed_status == STATUS_REFUSED:
         return SIGNAL_DECLINED
-    if current_verdict in ("ask", "deny") and observed_status == STATUS_EXECUTED:
+    if (
+        current_verdict in (DECISION_ASK, DECISION_DENY)
+        and observed_status == STATUS_EXECUTED
+    ):
         return SIGNAL_ALLOW_CANDIDATE
-    if current_verdict == "deny":
+    if current_verdict == DECISION_DENY:
         return SIGNAL_DENIED
-    if current_verdict == "ask":
+    if current_verdict == DECISION_ASK:
         return SIGNAL_ASKED
     return SIGNAL_CONSISTENT
 
@@ -366,7 +380,11 @@ def evaluate_added_allow_rule(
     diff = replay(corpus, config, config_b)
 
     newly_allowed = sorted(
-        {d.entry.command for d in diff.broadened() if d.decision_b.decision == "allow"}
+        {
+            d.entry.command
+            for d in diff.broadened()
+            if d.decision_b.decision == DECISION_ALLOW
+        }
     )
 
     return AddRuleEffect(

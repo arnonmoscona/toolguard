@@ -2736,7 +2736,7 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             source (see resolve.py::_deciding_sub_match), not a real 'python
             *' stub match hook.py re-classifies away at log time. This pins
             hook.py::_log_allowed_command logging the placeholder via
-            UnitVerdict.fallback_kind, not merely forwarding an already-None
+            UnitVerdict.fallback_outcome, not merely forwarding an already-None
             value from elsewhere.
         """
         config = self._config(
@@ -3074,7 +3074,7 @@ class TestAutoModeTrace(unittest.TestCase):
             by the escape hatch rather than by any configured rule)
         When _handle_command_tool resolves 'python -c "print(1)"'
         Then log_auto_mode_trace fires with fallback_cause='undecidable' --
-            proven via RuntimeVerdict.fallback_kind == 'denied'
+            proven via RuntimeVerdict.fallback_outcome == 'denied'
         """
         config = self._config(
             {
@@ -3110,9 +3110,9 @@ class TestAutoModeTrace(unittest.TestCase):
             round 6 (2026-09-06): _judge_inline_code_unit now sets
             UnitVerdict.fallback_cause='undecidable' structurally, at the
             point of decision, rather than the trace trying to re-derive it
-            downstream from fallback_kind (which cannot distinguish this
+            downstream from fallback_outcome (which cannot distinguish this
             from an ordinary no-match allow -- see the sibling test below
-            for that exact live regression, and UnitVerdict.fallback_kind's
+            for that exact live regression, and UnitVerdict.fallback_outcome's
             own docstring)
         """
         config = self._config(
@@ -3148,7 +3148,7 @@ class TestAutoModeTrace(unittest.TestCase):
         When _handle_command_tool resolves 'some-unmatched-command-xyz --flag'
         Then log_auto_mode_trace fires with fallback_cause='no_match', NEVER
             'undecidable' -- an earlier version of this classifier tried to
-            infer the cause from UnitVerdict.fallback_kind='silent', which
+            infer the cause from UnitVerdict.fallback_outcome='silent', which
             resolve.py's own plain no_match_fallback path sets to the
             IDENTICAL value the undecidable escape hatch uses, so every
             unmatched command under this exact configuration was mislabelled

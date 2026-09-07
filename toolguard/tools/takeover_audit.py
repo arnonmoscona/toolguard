@@ -30,6 +30,13 @@ What each finding reads:
     it is ``'allow_with_warning'`` or ``'allow'``. ``'deny'`` is deliberately
     not flagged: it is stricter than the ``'ask'`` default, and a finding on a
     safe configuration would train users to ignore findings.
+``loose-no-match-fallback-in-auto-mode`` (LOW) / ``loose-undecidable-fallback-in-auto-mode`` (HIGH)
+    As the two findings above, but reading ``resolved_no_match_fallback_in_auto_mode``/
+    ``resolved_undecidable_fallback_in_auto_mode`` (TOO-28) -- this tool has no
+    ``Invocation``, so it reports what the auto-mode setting would resolve to, not
+    whether a live call is actually in auto mode. Fires only when the auto value is
+    both loose AND different from the base one, so an unset auto setting (which always
+    equals the base by construction) never duplicates the finding above.
 """
 
 from dataclasses import dataclass
@@ -37,7 +44,21 @@ from enum import IntEnum
 from typing import List, Optional, Set, Tuple
 
 from toolguard.claude_code_contract import PRE_TOOL_USE_EVENT
-from toolguard.config import Configuration, Provenance, TakeoverConfig
+from toolguard.config import (
+    NO_MATCH_FALLBACK_IN_AUTO_MODE_KEY,
+    NO_MATCH_FALLBACK_KEY,
+    UNDECIDABLE_FALLBACK_IN_AUTO_MODE_KEY,
+    UNDECIDABLE_FALLBACK_KEY,
+    Configuration,
+    Provenance,
+    TakeoverConfig,
+)
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    FALLBACK_ALLOW_WITH_WARNING,
+)
 from toolguard.rule_entry import strip_tool_wrapper
 
 
@@ -391,7 +412,7 @@ def audit_takeover(
     #
     # A blanket "!= 'deny'" test rather than an enumeration of the loose values,
     # so an added or renamed loose spelling needs no change here.
-    expected_fallback = "deny"
+    expected_fallback = DECISION_DENY
     resolved_fallback = config.resolved_no_match_fallback()
     if resolved_fallback != expected_fallback:
         findings.append(
@@ -401,7 +422,7 @@ def audit_takeover(
                 tool=None,
                 provenance=None,
                 description=(
-                    f"no_match_fallback is '{resolved_fallback}', not 'deny'. "
+                    f"no_match_fallback is '{resolved_fallback}', not '{DECISION_DENY}'. "
                     f"Commands that match no allow rule will not be hard-blocked."
                 ),
                 impact=(
@@ -411,8 +432,8 @@ def audit_takeover(
                     "unexpected commands."
                 ),
                 remediation=(
-                    'Set no_match_fallback = "deny" in [takeover_mode] of your '
-                    "toolguard_hook.toml/json to restore fail-closed behaviour."
+                    f'Set no_match_fallback = "{DECISION_DENY}" in [takeover_mode] of '
+                    "your toolguard_hook.toml/json to restore fail-closed behaviour."
                 ),
             )
         )
@@ -424,8 +445,8 @@ def audit_takeover(
     # not takeover is enabled. 'allow_with_no_warnings' never arrives here as
     # such -- resolved_undecidable_fallback() normalizes it to 'allow' first.
     resolved_undecidable = config.resolved_undecidable_fallback()
-    if resolved_undecidable in ("allow_with_warning", "allow"):
-        if resolved_undecidable == "allow_with_warning":
+    if resolved_undecidable in (FALLBACK_ALLOW_WITH_WARNING, DECISION_ALLOW):
+        if resolved_undecidable == FALLBACK_ALLOW_WITH_WARNING:
             execution_note = (
                 "will execute with a warning instead of being asked about or denied."
             )
@@ -458,9 +479,9 @@ def audit_takeover(
                 provenance=None,
                 description=(
                     f"undecidable_fallback is '{resolved_undecidable}', not "
-                    "'ask' (the default) or 'deny'. Commands toolguard could "
-                    "not safely parse at all -- foreign inline code, heredoc "
-                    "payloads, process substitution, unparseable control "
+                    f"'{DECISION_ASK}' (the default) or '{DECISION_DENY}'. Commands "
+                    "toolguard could not safely parse at all -- foreign inline code, "
+                    "heredoc payloads, process substitution, unparseable control "
                     f"structures -- {execution_note}"
                 ),
                 impact=(
@@ -473,10 +494,84 @@ def audit_takeover(
                     f"with NO rule ever evaluated against their contents{no_rule_note}"
                 ),
                 remediation=(
-                    'Set undecidable_fallback to "ask" (the default) or '
-                    '"deny" at the top level of your toolguard_hook.toml/json '
+                    f'Set undecidable_fallback to "{DECISION_ASK}" (the default) or '
+                    f'"{DECISION_DENY}" at the top level of your toolguard_hook.toml/json '
                     "to restore the ASK floor for command segments toolguard "
                     "cannot safely decompose."
+                ),
+            )
+        )
+
+    # Invariants 6/7: loose *_in_auto_mode fallback (TOO-28).
+    #
+    # audit_takeover has no Invocation/permission_mode, so it cannot know whether a
+    # live call would actually be in auto mode -- it reports what the auto-mode
+    # setting WOULD resolve to if it were consulted. Fires only when the auto value
+    # differs from the base one (an unset auto setting always equals the base by
+    # construction -- see Configuration.resolved_no_match_fallback_in_auto_mode --
+    # so equality means "nothing new to say", already covered by invariant 4/5 when
+    # the base itself is loose). This is the gap invariant 4/5 alone cannot see: a
+    # strict base ('deny') with a loose auto override is otherwise invisible here.
+    resolved_fallback_auto = config.resolved_no_match_fallback_in_auto_mode()
+    if (
+        resolved_fallback_auto != resolved_fallback
+        and resolved_fallback_auto != expected_fallback
+    ):
+        findings.append(
+            AuditFinding(
+                finding_id="loose-no-match-fallback-in-auto-mode",
+                severity=AuditSeverity.LOW,
+                tool=None,
+                provenance=None,
+                description=(
+                    f"{NO_MATCH_FALLBACK_IN_AUTO_MODE_KEY} is "
+                    f"'{resolved_fallback_auto}', looser than the non-auto "
+                    f"{NO_MATCH_FALLBACK_KEY} ('{resolved_fallback}'). Under Claude "
+                    "Code's auto permission mode, commands that match no allow rule "
+                    "are governed by this setting instead."
+                ),
+                impact=(
+                    "Toolguard's fail-closed guarantee is weakened specifically "
+                    f"under auto mode, in a way invisible to the non-auto "
+                    f"{NO_MATCH_FALLBACK_KEY} reading above."
+                ),
+                remediation=(
+                    f'Set {NO_MATCH_FALLBACK_IN_AUTO_MODE_KEY} = "{DECISION_DENY}" (or '
+                    f"leave it unset to defer to {NO_MATCH_FALLBACK_KEY}) to restore "
+                    "fail-closed behaviour under auto mode."
+                ),
+            )
+        )
+
+    loose_undecidable_values = (FALLBACK_ALLOW_WITH_WARNING, DECISION_ALLOW)
+    resolved_undecidable_auto = config.resolved_undecidable_fallback_in_auto_mode()
+    if (
+        resolved_undecidable_auto != resolved_undecidable
+        and resolved_undecidable_auto in loose_undecidable_values
+    ):
+        findings.append(
+            AuditFinding(
+                finding_id="loose-undecidable-fallback-in-auto-mode",
+                severity=AuditSeverity.HIGH,
+                tool=None,
+                provenance=None,
+                description=(
+                    f"{UNDECIDABLE_FALLBACK_IN_AUTO_MODE_KEY} is "
+                    f"'{resolved_undecidable_auto}', looser than the non-auto "
+                    f"{UNDECIDABLE_FALLBACK_KEY} ('{resolved_undecidable}'). Under "
+                    "Claude Code's auto permission mode, commands toolguard could "
+                    "not safely parse at all are governed by this setting instead."
+                ),
+                impact=(
+                    "As with the non-auto reading above, but scoped to auto mode "
+                    "and invisible to it: commands toolguard never evaluated any "
+                    "rule against execute with no rule ever having seen them."
+                ),
+                remediation=(
+                    f'Set {UNDECIDABLE_FALLBACK_IN_AUTO_MODE_KEY} to "{DECISION_ASK}" '
+                    f'or "{DECISION_DENY}" (or leave it unset to defer to '
+                    f"{UNDECIDABLE_FALLBACK_KEY}) to restore the ASK floor under "
+                    "auto mode."
                 ),
             )
         )

@@ -351,9 +351,10 @@ def unit_verdict_to_dict(
     only ``sub_command``/``decision``/``matched_rule``/``provenance``.
     ``reason``/``additional_context`` are per-unit prose, not the structural
     identity this pins (the compound's own ``reason``/``additional_context``
-    are already tracked at the top level), and ``fallback_kind`` is a
-    rendering aid for ``hook.py``'s log substitution, not part of the
-    audit-loss surface this guards.
+    are already tracked at the top level); ``fallback_outcome`` and
+    ``fallback_cause`` are rendering/classification aids for ``hook.py``'s
+    own log and trace substitution, not part of the audit-loss surface this
+    guards.
 
     Args:
         unit: One entry from ``RuntimeVerdict.sub_matches``.

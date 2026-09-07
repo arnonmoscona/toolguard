@@ -996,6 +996,94 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
         result = self._resolve(config, 'python3 -c "import os"')
         self.assertEqual(result.decision, "ask")
 
+    # An enumeration-over-values test for this setting used to live here as its own
+    # method; it is now subsumed by
+    # test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting,
+    # which drives the same command through the same resolver for every registered
+    # setting (this one included) from one registry-driven test.
+
+
+class TestUndecidableFallbackAutoMode(unittest.TestCase):
+    """
+    resolve_bash_permission_detailed() consults undecidable_fallback_in_auto_mode
+    (TOO-28) instead of undecidable_fallback when Invocation.permission_mode is the
+    auto mode, and leaves the base setting's own behaviour untouched otherwise.
+    """
+
+    def _config(
+        self,
+        *,
+        undecidable_fallback=None,
+        undecidable_fallback_in_auto_mode=None,
+        allow=(),
+    ):
+        """Build a config with the given top-level keys set, omitting any left None."""
+        content = {"permissions": {"allow": [f"Bash({p})" for p in allow], "deny": []}}
+        if undecidable_fallback is not None:
+            content["undecidable_fallback"] = undecidable_fallback
+        if undecidable_fallback_in_auto_mode is not None:
+            content["undecidable_fallback_in_auto_mode"] = (
+                undecidable_fallback_in_auto_mode
+            )
+        return _make_config([("project", "toolguard_hook", content)])
+
+    def _resolve(self, config, command, *, permission_mode=None):
+        """Resolve *command* with the given Invocation.permission_mode."""
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode=permission_mode,
+        )
+        return resolve_bash_permission_detailed(command, invocation)
+
+    def test_auto_mode_setting_applies_only_under_auto_permission_mode(self):
+        """
+        Given undecidable_fallback_in_auto_mode='allow' and the base
+            undecidable_fallback left at its 'ask' default
+        When a foreign inline-code command is resolved once under
+            permission_mode='auto' and once under permission_mode='default'
+        Then the auto-mode call resolves to 'allow' (the auto setting) and the
+            default-mode call resolves to 'ask' (the base setting) -- the mode
+            alone selects which setting governs
+        """
+        config = self._config(
+            undecidable_fallback_in_auto_mode="allow", allow=["python3 -c:*"]
+        )
+        cmd = 'python3 -c "import os"'
+
+        auto_result = self._resolve(config, cmd, permission_mode="auto")
+        default_result = self._resolve(config, cmd, permission_mode="default")
+
+        self.assertEqual(auto_result.decision, "allow")
+        self.assertEqual(default_result.decision, "ask")
+
+    def test_unset_auto_mode_setting_is_inert_even_under_auto_mode(self):
+        """
+        Given ONLY the base undecidable_fallback='deny' set, with
+            undecidable_fallback_in_auto_mode left UNSET
+        When a foreign inline-code command is resolved under
+            permission_mode='auto'
+        Then the decision is 'deny' -- the SAME as under any other mode --
+            proving an unset auto-mode setting changes nothing (spec section
+            4.1's inertness requirement)
+        """
+        config = self._config(undecidable_fallback="deny", allow=["python3 -c:*"])
+        cmd = 'python3 -c "import os"'
+
+        auto_result = self._resolve(config, cmd, permission_mode="auto")
+        default_result = self._resolve(config, cmd, permission_mode="default")
+
+        self.assertEqual(auto_result.decision, "deny")
+        self.assertEqual(default_result.decision, "deny")
+
+    # A broken-config/parse-failure test for this setting used to live here as its
+    # own method; it is now subsumed by
+    # test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting,
+    # which covers the same assertion (and every other registered setting/value/mode
+    # combination) from one registry-driven test instead of one method per setting.
+
 
 class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
     """A single-leaf ask-floor command and a multi-leaf compound wrapping the same leaf must agree on fallback_warning and never fabricate a matched rule."""
@@ -1093,7 +1181,7 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         When resolving 'ls && python -c "print(1)"'
         Then result.sub_matches records the leaf's real, full text (not the
             truncated outer-command stub 'python -c') with matched_rule=None
-            and fallback_kind='warned'
+            and fallback_outcome='warned'
         """
         config = self._repro_config("allow_with_warning")
         result = resolve_bash_permission_detailed(
@@ -1109,7 +1197,7 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         )
         escape_hatch_unit = by_command['python -c "print(1)"']
         self.assertIsNone(escape_hatch_unit.matched_rule)
-        self.assertEqual(escape_hatch_unit.fallback_kind, "warned")
+        self.assertEqual(escape_hatch_unit.fallback_outcome, "warned")
         self.assertEqual(escape_hatch_unit.decision, "allow")
 
     def test_multi_leaf_matched_rule_attributes_the_sole_genuine_match(self):
@@ -1714,7 +1802,7 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
         When the compound is allowed and logged
         Then the escape-hatch leaf still records the placeholder, not a
             blank matched_rule -- an itemised breakdown must not defeat the
-            structural fallback_kind tag the log reads
+            structural fallback_outcome tag the log reads
         """
         config = _make_config(
             [
@@ -1780,7 +1868,7 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
             reason=result.reason,
             matched_rule=result.matched_rule,
             additional_context=result.additional_context,
-            fallback_kind=result.fallback_kind,
+            fallback_outcome=result.fallback_outcome,
         )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
@@ -1832,7 +1920,7 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
             "TOO-45 R1e closed",
         )
         self.assertEqual(
-            by_command['python -c "print(1)"'].fallback_kind,
+            by_command['python -c "print(1)"'].fallback_outcome,
             "denied",
         )
         self.assertEqual(call.args[0].violated_rules, [FALLBACK_DENY_PLACEHOLDER])
@@ -2341,8 +2429,8 @@ class TestFallbackWarningField(unittest.TestCase):
                     self.assertNotIn("allow_with_warning", result.reason)
 
 
-class TestRuntimeVerdictFallbackKind(unittest.TestCase):
-    """RuntimeVerdict.fallback_kind, asserted at the point of decision -- not via the
+class TestRuntimeVerdictFallbackOutcome(unittest.TestCase):
+    """RuntimeVerdict.fallback_outcome, asserted at the point of decision -- not via the
     audit log downstream. Only ``'denied'``/``None`` are reachable here (``'warned'``/
     ``'silent'`` are UnitVerdict-only, see test_compound_resolve_seam.py)."""
 
@@ -2351,7 +2439,7 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
         Given undecidable_fallback='deny' and a single ASK-floor leaf with no
             matching rule
         When resolve_bash_permission_detailed resolves it
-        Then the decision is 'deny' and fallback_kind is 'denied' -- set
+        Then the decision is 'deny' and fallback_outcome is 'denied' -- set
             structurally at the point the escape hatch decided, not derived
             from reason text
         """
@@ -2372,14 +2460,14 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
             Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "deny")
-        self.assertEqual(result.fallback_kind, "denied")
+        self.assertEqual(result.fallback_outcome, "denied")
 
-    def test_genuine_deny_rule_match_leaves_fallback_kind_none(self):
+    def test_genuine_deny_rule_match_leaves_fallback_outcome_none(self):
         """
         Given a command that matches a configured deny rule directly (no
             escape hatch involved at all)
         When resolve_bash_permission_detailed resolves it
-        Then the decision is 'deny' and fallback_kind is None
+        Then the decision is 'deny' and fallback_outcome is None
         """
         config = _make_config(
             [
@@ -2394,14 +2482,14 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
             "rm -rf /tmp/x", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "deny")
-        self.assertIsNone(result.fallback_kind)
+        self.assertIsNone(result.fallback_outcome)
 
-    def test_hard_deny_leaves_fallback_kind_none(self):
+    def test_hard_deny_leaves_fallback_outcome_none(self):
         """
         Given a command matching the unoverridable [hard_deny] pool
         When resolve_bash_permission_detailed resolves it
-        Then the decision is 'deny' and fallback_kind is None -- a hard deny
-            is always a genuine match, never an escape hatch
+        Then the decision is 'deny' and fallback_outcome is None -- a hard
+            deny is always a genuine match, never an escape hatch
         """
         config = _make_config(
             [("project", "toolguard_hook", {"hard_deny": {"deny": ["Bash(curl:*)"]}})]
@@ -2410,16 +2498,17 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
             "curl http://x", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "deny")
-        self.assertIsNone(result.fallback_kind)
+        self.assertIsNone(result.fallback_outcome)
 
-    def test_no_match_fallback_deny_leaves_fallback_kind_none_for_bash(self):
+    def test_no_match_fallback_deny_leaves_fallback_outcome_none_for_bash(self):
         """
         Given no_match_fallback='deny' and a command no rule covers at all
         When resolve_bash_permission_detailed resolves it
-        Then the decision is 'deny' and fallback_kind is None -- deliberately
-            left untagged, the same as a genuine deny (both mean "nothing
-            here permits this"); this is NOT the undecidable_fallback=deny
-            escape hatch and must not be conflated with it
+        Then the decision is 'deny' and fallback_outcome is None --
+            deliberately left untagged, the same as a genuine deny (both
+            mean "nothing here permits this"); this is NOT the
+            undecidable_fallback=deny escape hatch and must not be
+            conflated with it
         """
         config = _make_config(
             [
@@ -2437,15 +2526,15 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
             "ls -la", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "deny")
-        self.assertIsNone(result.fallback_kind)
+        self.assertIsNone(result.fallback_outcome)
 
-    def test_no_match_fallback_deny_leaves_fallback_kind_none_for_file_path(self):
+    def test_no_match_fallback_deny_leaves_fallback_outcome_none_for_file_path(self):
         """
         Given no_match_fallback='deny' and a file path no Read rule covers
         When resolve_file_path_permission_detailed resolves it
-        Then the decision is 'deny' and fallback_kind is None -- file paths
-            have no undecidable_fallback concept, so this untagged case is
-            the only deny fallback shape they can produce
+        Then the decision is 'deny' and fallback_outcome is None -- file
+            paths have no undecidable_fallback concept, so this untagged
+            case is the only deny fallback shape they can produce
         """
         config = _make_config(
             [
@@ -2463,14 +2552,14 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
             "README.md", Invocation.for_evaluation(config, tool_name="Read")
         )
         self.assertEqual(result.decision, "deny")
-        self.assertIsNone(result.fallback_kind)
+        self.assertIsNone(result.fallback_outcome)
 
-    def test_ask_decision_leaves_fallback_kind_none(self):
+    def test_ask_decision_leaves_fallback_outcome_none(self):
         """
         Given the default undecidable_fallback='ask' and an ASK-floor leaf
             with no matching rule
         When resolve_bash_permission_detailed resolves it
-        Then the decision is 'ask' and fallback_kind is None -- the ASK
+        Then the decision is 'ask' and fallback_outcome is None -- the ASK
             floor itself is not an allow/deny escape hatch
         """
         config = _make_config(
@@ -2481,7 +2570,7 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
             Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "ask")
-        self.assertIsNone(result.fallback_kind)
+        self.assertIsNone(result.fallback_outcome)
 
 
 class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):

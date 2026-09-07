@@ -166,20 +166,21 @@ def _format_summary(
         sections.append("\n".join(broken_lines))
 
     if unrecognized_fallbacks:
-        fallback_lines = [
-            "toolguard: UNRECOGNIZED FALLBACK SETTING -- resolving to 'ask' "
-            "(maximum prompting) --"
-        ]
+        # Each entry names its own fallback (bad.falls_back_to) rather than a blanket
+        # "'ask'" here: the '*_in_auto_mode' settings (TOO-28) defer to their resolved
+        # base setting instead, which is not always 'ask'.
+        fallback_lines = ["toolguard: UNRECOGNIZED FALLBACK SETTING --"]
         for bad in unrecognized_fallbacks:
             fallback_lines.append(
                 f"  - {bad.key} = {bad.value!r} in "
-                f"{bad.provenance.describe_brief()} is not a recognized value"
+                f"{bad.provenance.describe_brief()} is not a recognized value; "
+                f"falls back to {bad.falls_back_to}"
             )
             fallback_lines.append(f"    accepted: {', '.join(bad.accepted)}")
         fallback_lines.append(
-            "  This is almost always a typo. Until it is fixed the setting has "
-            "no effect and every decision it was meant to make falls back to "
-            "'ask' -- the safe direction, but the most friction."
+            "  This is almost always a typo. Until it is fixed, each setting above "
+            "has no effect and every decision it was meant to make falls back as "
+            "described -- the safe direction, but not what was intended."
         )
         sections.append("\n".join(fallback_lines))
 

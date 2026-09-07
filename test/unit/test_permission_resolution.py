@@ -14,12 +14,14 @@ from pathlib import Path
 from types import MappingProxyType
 
 from toolguard.config import Configuration, ConfigLayer, Provenance
+from toolguard.config import _FALLBACK_SETTINGS
 from toolguard.invocation import Invocation
 from toolguard.permission_resolution import (
     apply_parse_failure_floor,
     resolve_command_permission,
     resolve_file_path_permission,
 )
+from toolguard.resolve import resolve_bash_permission_detailed
 
 _PROJECT_PATH = Path("/p/.claude/toolguard_hook.toml")
 _USER_PATH = Path("/h/.claude/toolguard_hook.toml")
@@ -45,6 +47,11 @@ def _layer(level, path, *, allow=(), deny=(), specificity=0, **settings):
         settings: Extra top-level ``toolguard_hook`` keys, e.g.
             ``no_match_fallback``.
     """
+    # Refuse rather than overwrite: 'permissions' arriving via **settings would be
+    # silently replaced by the allow=/deny= rebuild below, leaving a test that asserts
+    # against no rules at all and passes for the wrong reason.
+    if "permissions" in settings:
+        raise TypeError("pass rules via allow=/deny=, not permissions=")
     content = dict(settings)
     content["permissions"] = {"allow": list(allow), "deny": list(deny)}
     return ConfigLayer(
@@ -330,6 +337,173 @@ class TestFloorCoversFilePathTools(unittest.TestCase):
 
         self.assertEqual(resolved.decision, "allow")
         self.assertEqual(resolved.matched_rule, "/etc/**")
+
+
+class TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting(unittest.TestCase):
+    """
+    The TOO-19 parse-failure ASK floor (spec section 8) must hold for every
+    fallback-shaped setting, not just today's two. Iterates
+    ``toolguard.config._FALLBACK_SETTINGS`` -- the single declared registry also read by
+    ``Configuration.unrecognized_fallback_settings`` -- instead of naming settings by
+    hand, so a future setting added to that registry is automatically covered here too:
+    adding a setting to the registry is what makes it visible to the diagnostic, and the
+    same addition pulls it under this invariant with no second place to remember.
+    """
+
+    def _resolve(self, setting, value, permission_mode):
+        """Resolve a floor-triggering command with *setting* set to *value*, under a recorded parse failure."""
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=["Bash(git:*)", "Bash(python3 -c:*)"],
+                **{setting.key: value},
+            ),
+            parse_failures=_PARSE_FAILURES,
+        )
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode=permission_mode,
+        )
+        command = "ls -la" if setting.kind == "no_match" else 'python3 -c "import os"'
+        return resolve_bash_permission_detailed(command, invocation)
+
+    def test_floor_holds_for_every_setting_value_and_mode(self):
+        """
+        Given every setting in the fallback-settings registry, each of its valid
+            values in turn, under a recorded parse failure, and under every
+            permission_mode where that setting's value is actually consulted
+            (both modes for a base setting; only 'auto' for an auto-only one --
+            testing an auto-only setting's value under a mode where it is never
+            read would assert nothing about that setting)
+        When the corresponding floor-triggering command is resolved
+        Then the decision is 'ask' in every case except 'deny', which the
+            floor's already-deny exemption leaves unchanged -- regardless of
+            which registered setting supplied the value or which of its
+            consulted modes was in effect
+        """
+        for setting in _FALLBACK_SETTINGS:
+            modes = ("auto",) if setting.auto_only else ("auto", "default")
+            for value in sorted(setting.valid_values):
+                want = "deny" if value == "deny" else "ask"
+                for mode in modes:
+                    with self.subTest(setting=setting.key, value=value, mode=mode):
+                        result = self._resolve(setting, value, mode)
+                        self.assertEqual(result.decision, want)
+
+
+class TestNoMatchFallbackAutoMode(unittest.TestCase):
+    """
+    resolve_command_permission() consults no_match_fallback_in_auto_mode (TOO-28)
+    instead of no_match_fallback when Invocation.permission_mode is the auto mode,
+    and leaves the base setting's own behaviour untouched otherwise.
+    """
+
+    def _build_config(
+        self, *, no_match_fallback=None, no_match_fallback_in_auto_mode=None, **kw
+    ):
+        """
+        Build a config with the given top-level keys set, omitting any left None.
+
+        Always carries an unrelated deny rule so has_any_rules() is True and an
+        unmatched "ls -la" reaches the no_match_fallback branch, rather than the
+        separate "tool entirely unconfigured" branch that always resolves 'ask'
+        regardless of no_match_fallback.
+        """
+        settings = dict(kw)
+        if no_match_fallback is not None:
+            settings["no_match_fallback"] = no_match_fallback
+        if no_match_fallback_in_auto_mode is not None:
+            settings["no_match_fallback_in_auto_mode"] = no_match_fallback_in_auto_mode
+        return _config(
+            _layer("project", _PROJECT_PATH, deny=["Bash(rm -rf /)"], **settings)
+        )
+
+    def _resolve(self, config, command, *, permission_mode=None):
+        """Resolve *command* with the given Invocation.permission_mode."""
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode=permission_mode,
+        )
+        return resolve_command_permission(invocation, command)
+
+    def test_auto_mode_setting_applies_only_under_auto_permission_mode(self):
+        """
+        Given no_match_fallback_in_auto_mode='allow' and the base
+            no_match_fallback left at its 'ask' default
+        When an unmatched command is resolved once under
+            permission_mode='auto' and once under permission_mode='default'
+        Then the auto-mode call resolves to 'allow' and the default-mode call
+            resolves to 'ask' -- the mode alone selects which setting governs
+        """
+        config = self._build_config(no_match_fallback_in_auto_mode="allow")
+
+        auto_result = self._resolve(config, "ls -la", permission_mode="auto")
+        default_result = self._resolve(config, "ls -la", permission_mode="default")
+
+        self.assertEqual(auto_result.decision, "allow")
+        self.assertEqual(default_result.decision, "ask")
+
+    def test_unset_auto_mode_setting_is_inert_even_under_auto_mode(self):
+        """
+        Given ONLY the base no_match_fallback='deny' set, with
+            no_match_fallback_in_auto_mode left UNSET
+        When an unmatched command is resolved under permission_mode='auto'
+        Then the decision is 'deny' -- the SAME as under any other mode --
+            proving an unset auto-mode setting changes nothing
+        """
+        config = self._build_config(no_match_fallback="deny")
+
+        auto_result = self._resolve(config, "ls -la", permission_mode="auto")
+        default_result = self._resolve(config, "ls -la", permission_mode="default")
+
+        self.assertEqual(auto_result.decision, "deny")
+        self.assertEqual(default_result.decision, "deny")
+
+    # A broken-config/parse-failure test for this setting used to live here as its
+    # own method; it is now subsumed by
+    # TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting, which covers the
+    # same assertion (and every other registered setting/value/mode combination)
+    # from one registry-driven test instead of one method per setting.
+
+    def test_no_match_and_undecidable_auto_mode_settings_are_independent(self):
+        """
+        Given a SINGLE config setting no_match_fallback_in_auto_mode='allow'
+            AND undecidable_fallback_in_auto_mode='deny' together, under
+            permission_mode='auto'
+        When a plain no-match command is resolved
+        Then it is ALLOWED -- governed only by no_match_fallback_in_auto_mode,
+            proving the two auto-mode settings do not couple (spec section
+            4.1's independence requirement; the undecidable side of the same
+            config is exercised in
+            test_resolve.TestUndecidableFallbackAutoMode)
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                deny=["Bash(rm -rf /)"],
+                no_match_fallback_in_auto_mode="allow",
+                undecidable_fallback_in_auto_mode="deny",
+            )
+        )
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode="auto",
+        )
+
+        resolved = resolve_command_permission(invocation, "ls -la")
+
+        self.assertEqual(resolved.decision, "allow")
 
 
 if __name__ == "__main__":

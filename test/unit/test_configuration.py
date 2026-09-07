@@ -2165,6 +2165,228 @@ class TestResolvedUndecidableFallback(unittest.TestCase):
         self.assertEqual(config.resolved_undecidable_fallback(), "allow_with_warning")
 
 
+class TestResolvedFallbacksInAutoMode(unittest.TestCase):
+    """
+    Configuration.resolved_no_match_fallback_in_auto_mode() /
+    resolved_undecidable_fallback_in_auto_mode() (TOO-28): same value vocabulary as
+    the base settings, but unset (or unrecognized) defers to the resolved BASE
+    setting rather than to a fixed literal.
+    """
+
+    @staticmethod
+    def _hook_layer(level, content, specificity=0):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}/toolguard_hook.toml"),
+                specificity,
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_no_match_unset_defers_to_the_base_setting(self):
+        """
+        Given no_match_fallback='deny' and no_match_fallback_in_auto_mode UNSET
+        When resolved_no_match_fallback_in_auto_mode() resolves
+        Then it returns 'deny' -- the base setting's OWN resolved value, not
+            the base method's own 'ask' default
+        """
+        layers = (self._hook_layer("project", {"no_match_fallback": "deny"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback_in_auto_mode(), "deny")
+
+    def test_no_match_explicit_value_overrides_the_base_setting(self):
+        """
+        Given no_match_fallback='deny' and no_match_fallback_in_auto_mode='allow'
+        When resolved_no_match_fallback_in_auto_mode() resolves
+        Then it returns 'allow' -- its own explicit value, ignoring the base
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {
+                    "no_match_fallback": "deny",
+                    "no_match_fallback_in_auto_mode": "allow",
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback_in_auto_mode(), "allow")
+
+    def test_no_match_unrecognized_value_defers_to_the_base_setting(self):
+        """
+        Given no_match_fallback='deny' and
+            no_match_fallback_in_auto_mode='not-a-real-value'
+        When resolved_no_match_fallback_in_auto_mode() resolves
+        Then it returns 'deny' -- the same safe deferral as leaving it unset,
+            NOT the base method's own 'ask' default
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {
+                    "no_match_fallback": "deny",
+                    "no_match_fallback_in_auto_mode": "not-a-real-value",
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback_in_auto_mode(), "deny")
+
+    def test_undecidable_unset_defers_to_the_base_setting(self):
+        """
+        Given undecidable_fallback='allow_with_warning' and
+            undecidable_fallback_in_auto_mode UNSET
+        When resolved_undecidable_fallback_in_auto_mode() resolves
+        Then it returns 'allow_with_warning'
+        """
+        layers = (
+            self._hook_layer("project", {"undecidable_fallback": "allow_with_warning"}),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(
+            config.resolved_undecidable_fallback_in_auto_mode(), "allow_with_warning"
+        )
+
+    def test_undecidable_explicit_value_overrides_the_base_setting(self):
+        """
+        Given undecidable_fallback='deny' and
+            undecidable_fallback_in_auto_mode='allow'
+        When resolved_undecidable_fallback_in_auto_mode() resolves
+        Then it returns 'allow'
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {
+                    "undecidable_fallback": "deny",
+                    "undecidable_fallback_in_auto_mode": "allow",
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback_in_auto_mode(), "allow")
+
+    def test_allow_with_no_warnings_alias_normalizes_for_both_auto_settings(self):
+        """
+        Given both '*_in_auto_mode' keys set to the 'allow_with_no_warnings' synonym
+        When both are resolved
+        Then both normalize to 'allow', same as the base settings' own alias
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {
+                    "no_match_fallback_in_auto_mode": "allow_with_no_warnings",
+                    "undecidable_fallback_in_auto_mode": "allow_with_no_warnings",
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback_in_auto_mode(), "allow")
+        self.assertEqual(config.resolved_undecidable_fallback_in_auto_mode(), "allow")
+
+    def test_the_two_auto_mode_settings_are_independent(self):
+        """
+        Given no_match_fallback_in_auto_mode='allow' and
+            undecidable_fallback_in_auto_mode='deny' set together
+        When both are resolved
+        Then each resolves to its own configured value -- neither leaks into
+            the other's resolution
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {
+                    "no_match_fallback_in_auto_mode": "allow",
+                    "undecidable_fallback_in_auto_mode": "deny",
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback_in_auto_mode(), "allow")
+        self.assertEqual(config.resolved_undecidable_fallback_in_auto_mode(), "deny")
+
+
+class TestUnrecognizedFallbackSettingsAutoMode(unittest.TestCase):
+    """
+    Configuration.unrecognized_fallback_settings() (extended for TOO-28): the
+    '*_in_auto_mode' keys are diagnosed the same way as the base keys, but the
+    reported fallback names the resolved BASE setting instead of a fixed 'ask'.
+    """
+
+    @staticmethod
+    def _hook_layer(level, content, specificity=0):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}/toolguard_hook.toml"),
+                specificity,
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_unrecognized_auto_value_is_reported_with_the_base_fallback_named(self):
+        """
+        Given no_match_fallback='deny' and
+            no_match_fallback_in_auto_mode='allow_with_no_warning' (a typo:
+            missing the 's')
+        When unrecognized_fallback_settings() scans the layers
+        Then one entry is reported for 'no_match_fallback_in_auto_mode', and
+            its falls_back_to names the resolved base value ('deny'), not the
+            literal "'ask'" the base keys report
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {
+                    "no_match_fallback": "deny",
+                    "no_match_fallback_in_auto_mode": "allow_with_no_warning",
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        found = config.unrecognized_fallback_settings()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].key, "no_match_fallback_in_auto_mode")
+        self.assertIn("deny", found[0].falls_back_to)
+        self.assertNotEqual(found[0].falls_back_to, "'ask'")
+
+    def test_recognized_auto_value_is_not_reported(self):
+        """
+        Given no_match_fallback_in_auto_mode='allow' (a recognized value)
+        When unrecognized_fallback_settings() scans the layers
+        Then nothing is reported
+        """
+        layers = (
+            self._hook_layer("project", {"no_match_fallback_in_auto_mode": "allow"}),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.unrecognized_fallback_settings(), ())
+
+    def test_base_key_unrecognized_value_still_reports_the_literal_ask(self):
+        """
+        Given no_match_fallback='allow_with_no_warning' (the same typo, but on
+            the BASE key, not the auto-mode one)
+        When unrecognized_fallback_settings() scans the layers
+        Then the entry's falls_back_to is still the literal "'ask'" -- the base
+            keys' own behaviour is unchanged by the auto-mode keys' addition
+        """
+        layers = (
+            self._hook_layer("project", {"no_match_fallback": "allow_with_no_warning"}),
+        )
+        config = Configuration(layers=layers)
+        found = config.unrecognized_fallback_settings()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].falls_back_to, "'ask'")
+
+
 class TestProvenanceAndIntrospection(unittest.TestCase):
     """Provenance.describe, source_type property, describe_sources."""
 

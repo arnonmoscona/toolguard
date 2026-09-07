@@ -23,7 +23,14 @@ from typing import Dict, List
 from toolguard.api import decide
 from toolguard.config import Configuration
 from toolguard.config_types import RuntimeVerdict
-from toolguard.constants import STATUS_ASK, STATUS_EXECUTED, STATUS_REFUSED
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    STATUS_ASK,
+    STATUS_EXECUTED,
+    STATUS_REFUSED,
+)
 from toolguard.tools.log_harvest import LogEntry
 
 
@@ -32,7 +39,7 @@ from toolguard.tools.log_harvest import LogEntry
 # ---------------------------------------------------------------------------
 
 #: Strictness order for verdict comparison: higher = stricter.
-_STRICTNESS: Dict[str, int] = {"allow": 0, "ask": 1, "deny": 2}
+_STRICTNESS: Dict[str, int] = {DECISION_ALLOW: 0, DECISION_ASK: 1, DECISION_DENY: 2}
 
 
 def classify_change(verdict_a: str, verdict_b: str) -> str:
@@ -235,9 +242,9 @@ def _verdict_matches_status(verdict: str, status: str) -> bool:
     """
     status_upper = status.upper()
     if status_upper == STATUS_EXECUTED:
-        return verdict == "allow"
+        return verdict == DECISION_ALLOW
     if status_upper == STATUS_REFUSED:
-        return verdict in ("deny", "ask")
+        return verdict in (DECISION_DENY, DECISION_ASK)
     if status_upper == STATUS_ASK:
-        return verdict == "ask"
+        return verdict == DECISION_ASK
     return False

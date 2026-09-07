@@ -11,6 +11,145 @@ tags:
 tags: [task-memory, TOO-28]
 ---
 
+# TOO-28 Phase 2 -- two independent auto-mode fallbacks (CURRENT; everything below down to
+the next '---' divider that starts an older '## TOO-28 Phase 5' or similar section is STALE
+from earlier sessions -- this note's write_note overwrite does not take effect for this
+permalink, a known basic-memory quirk, so prepend is used instead)
+
+Brief: `toolguard-memories/TOO-28/brief-phase2.md` (validated, 5/5 slots). Plan reference:
+`toolguard-memories/TOO-28/TOO-28 implementation plan.md`.
+
+## Task
+
+Two new top-level `toolguard_hook` keys, `no_match_fallback_in_auto_mode` and
+`undecidable_fallback_in_auto_mode`, independently configurable, same value vocabulary
+(`ask`/`deny`/`allow_with_warning`/`allow`, plus the `allow_with_no_warnings` alias) as their
+base settings. When Claude Code's `permission_mode == "auto"`, the resolver consults the
+`_in_auto_mode` variant instead of the base one; unset means "defer to the base setting"
+(NOT a fixed default like `'ask'`) so the change is inert until someone opts in. `deny`,
+`hard_deny`, and the TOO-19 parse-failure ASK floor are untouched.
+
+Uncommitted `fallback_kind` -> `fallback_outcome` rename (9 files) stays in the tree; ships in
+the same commit as this phase, per Arnon. Baseline: 4043 tests / OK (expected failures=4);
+`ruff check .` clean; verified again at session start before touching anything.
+
+## In scope
+
+- `ResolutionContext`/`ResolveContext`/`FilePathResolutionContext` (`config_types.py`) gain
+  `permission_mode: Optional[str]`. `Invocation` already has the field (Phase 1), so it
+  satisfies the widened Protocol unchanged.
+- `Configuration.resolved_no_match_fallback_in_auto_mode()` /
+  `resolved_undecidable_fallback_in_auto_mode()` -- new methods, each one call to the existing
+  `_resolve_fallback_setting(key, valid_values, default, alias_map=...)` with `default` set to
+  the BASE resolved value (`self.resolved_no_match_fallback()` / `resolved_undecidable_fallback()`),
+  computed dynamically, not a literal. This reuses `_resolve_fallback_setting` with NO changes
+  to its body -- confirmed by reading it (see Findings below).
+- `ResolutionConfig`/`ResolveConfig` Protocols (`config_types.py`) gain the two new resolver
+  methods so `context.config.resolved_no_match_fallback_in_auto_mode()` etc. type-check.
+- `permission_resolution.py`: `resolve_command_permission`/`resolve_file_path_permission`
+  branch on `context.permission_mode == AUTO_PERMISSION_MODE` to pick base vs auto resolver
+  for `no_match_fallback`. Factor the branch into one small helper shared by both functions.
+- `resolve.py`: `resolve_bash_permission_detailed`'s `judge_unit(...)` call (line ~353)
+  branches the same way on `invocation.permission_mode` for `undecidable_fallback`.
+- A new shared constant `AUTO_PERMISSION_MODE = "auto"` -- MUST live in `config_types.py`
+  (config layer), not `hook.py` (runtime layer): `permission_resolution.py`/`resolve.py` are
+  engine layer and cannot import runtime. `hook.py` already has its own local
+  `AUTO_PERMISSION_MODE = "auto"` (used by the Phase 5 trace gate) -- change it to import the
+  same constant from `config_types.py` rather than leaving two literals that can drift (CLAUDE.md:
+  literal strings with semantic meaning belong in constants).
+- `tools/takeover_audit.py`: two new findings mirroring invariant 4/5 but reading the
+  `_in_auto_mode` resolvers, firing ONLY when `resolved_..._in_auto_mode() != resolved_...()`
+  (i.e. explicitly configured to something other than deferring to base) AND the auto value is
+  loose by the same predicate as the existing invariant. This catches the real gap (base=deny,
+  auto=allow, currently invisible) without duplicate-firing when unset (auto defers to base by
+  construction, so equality means "nothing new to say").
+- `docs/` (configuration reference) documents the two new settings, framed as handoff points
+  per spec section 2, not "auto-mode variants". NOT `install.md`, NOT skills (TOO-77).
+- Step 6: an ENUMERATING test asserting the parse-failure ASK floor is unaffected by either
+  new setting in every combination, under auto and non-auto -- written to also catch a FUTURE
+  fallback-ish setting, not hard-coded to just these two.
+
+## Out of scope
+
+Per-rule auto-mode override (spec 4.2, Phase 3). Any change to `deny`/`hard_deny`/the floor
+itself. Reading `permission_mode` for anything but these two settings. A Phase-5 trace on/off
+switch.
+
+## Key investigation findings (from reading the code this session, before writing anything)
+
+1. **`_resolve_fallback_setting`'s body needs NO changes.** Read in full:
+   `raw = self._first_toplevel_str_setting(key); if raw is None and legacy_alias: raw =
+   legacy_alias(); if alias_map and raw in alias_map: raw = alias_map[raw]; return raw if raw
+   in valid_values else default`. Passing a dynamically-computed `default` (the base resolved
+   value) rather than a literal works exactly as needed with zero modification.
+
+2. **"Unset" and "unrecognized" DO collapse to the same `default` inside `_resolve_fallback_setting`
+   -- confirmed, and it is the documented, deliberate "safe direction" for the two EXISTING
+   settings** (unset/unrecognized `no_match_fallback` -> `'ask'`, the strictest). This is
+   NOT a gap for the base settings: `Configuration.unrecognized_fallback_settings()` is a
+   SEPARATE diagnostic (not the resolver) that already scans every layer and reports a
+   `warning` Issue (via `_unrecognized_fallback_setting_issues`, surfaced at session start and
+   in config validation) for exactly "set to something unusable" -- distinguishing it from
+   "unset" is already solved, just not inside the resolver itself.
+   **For the two NEW settings this needs a genuinely different design**, because their default
+   isn't a fixed literal, it's "defer to base" -- so I'm extending `unrecognized_fallback_settings()`
+   (and its `valid_by_key`/`alias_by_key` dicts) to also cover the two new keys, reusing the exact
+   same per-layer scan. Its `describe()` method currently hardcodes "falling back to 'ask'" in
+   `UnrecognizedFallbackSetting` (`config_types.py`) -- WRONG for the new keys (they fall back to
+   the base setting's resolved value, which may not be 'ask'). Needs a message that names what it
+   actually falls back to, parametrized per key rather than hardcoded.
+   **This is the finding the brief most wanted checked, and the answer is: the base settings were
+   never actually ambiguous (the diagnostic already disambiguates them) -- the new settings need the
+   diagnostic extended AND its message corrected, which is a real, if minor, pre-existing inaccuracy
+   surfaced by adding keys with a different fallback target.**
+
+3. `apply_parse_failure_floor`/`_apply_ask_floor` are structurally already immune: neither
+   function takes a fallback-setting parameter at all, so nothing about *which* no_match/
+   undecidable resolver is consulted upstream can reach them. The floor is applied twice
+   (once per-sub-command inside `resolve_permission_cascade`, once again at the compound
+   boundary in `resolve.py:400`). Step 6's test should still exist (this is a hard invariant
+   worth pinning, not something to skip because it's already structurally true), enumerating
+   over both new settings' full value sets x both modes x parse-failure-present.
+
+4. Layer map confirmed via `.pyscn.toml`: `invocation` is `foundation`; `config`/`config_types`
+   are `config`; `permission_resolution`/`resolve`/`compound`/`permissions`/`file_matching`/
+   `parser` are `engine`; `hook`/`session_start`/`subagent` are `runtime`. `permission_resolution.py`
+   deliberately imports neither `config` nor `invocation` (docstring states this explicitly) --
+   only `config_types`. `resolve.py` already imports `Invocation` directly. `compound.py` takes
+   `undecidable_fallback` as an already-resolved plain string parameter and has no config/mode
+   awareness at all -- correct, no change needed there; the mode branch happens in `resolve.py`
+   before calling `judge_unit`.
+
+5. `tools/takeover_audit.py::audit_takeover(config)` takes only a `Configuration`, no
+   `Invocation`/`permission_mode` -- confirmed, matches the brief. Existing Invariant 4
+   (`loose-no-match-fallback`, LOW) and Invariant 5 (`loose-undecidable-fallback`, HIGH) read
+   `config.resolved_no_match_fallback()`/`resolved_undecidable_fallback()` and fire when not
+   `'deny'` / when loose, respectively. Adding two new findings alongside them, same file,
+   same pattern.
+
+6. Call sites needing the mode branch (exhaustive, from grep): `permission_resolution.py:421`
+   (`resolve_command_permission`), `permission_resolution.py:466` (`resolve_file_path_permission`),
+   `resolve.py:353` (`judge_unit`'s `undecidable_fallback` arg). No other call site of either
+   base resolver exists outside `config.py`, `takeover_audit.py`, and tests.
+
+## Process notes
+
+- TDD required (this adds behaviour). Paste RED runs, no `RED:` markers left in code.
+- Corpus equivalence (step 10/11) must hold with the new settings UNSET -- proof of inertness.
+  Calibrate the instrument first (plant a change, confirm `--verify` fails, revert, confirm
+  clean diff and passing verify) before trusting a "no differences" result.
+- Live end-to-end (step 13): drive the real `toolguard.hook:main` via piped synthetic
+  `PreToolUse` JSON, from the repo root, under both `permission_mode: "auto"` (with the new
+  setting configured, unmatched command) and `permission_mode: "default"` -- paste both.
+- Final report: five headings at column 0, no preamble. Files opened in JetBrains via
+  `projectPath="//wsl.localhost/Ubuntu-26.04/home/arnon/projects/toolguard"`.
+
+---
+
+---
+tags: [task-memory, TOO-28]
+---
+
 # TOO-28 Phase 5 -- coder task recall (this session; content below down to the next '---'
 divider that starts a new '## TOO-28' or '## Ticket' section is STALE, from an earlier
 session, and is being replaced piecemeal since this note's write_note overwrite is not

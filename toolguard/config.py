@@ -22,8 +22,10 @@ should always prefer :func:`load_configuration`. A few remain public only becaus
 not-yet-migrated non-test callers still use them -- ``find_project_root``,
 ``discover_config_files``, ``load_config_file``, and
 ``config_sync_settings_from_sources`` (used by ``auto_migrate``). :func:`wrap_tool_pattern`
-is also public, but by design -- it is a standalone helper unrelated to loading. Everything
-else is underscore-prefixed.
+is also public, but by design -- it is a standalone helper unrelated to loading. The four
+``*_KEY`` fallback-setting-name constants (``NO_MATCH_FALLBACK_KEY`` and siblings) are public
+by design too, so :mod:`toolguard.tools.takeover_audit` can name a setting in a message
+without retyping its spelling. Everything else is underscore-prefixed.
 """
 
 import functools
@@ -33,7 +35,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
 
 from toolguard import ambient
 from toolguard.config_types import ConfigLayer as ConfigLayer
@@ -51,6 +53,13 @@ from toolguard.config_validation import (
     find_regex_control_char_issues,
     find_wrong_shaped_permission_lists,
     validate_permissions,
+)
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    FALLBACK_ALLOW_WITH_NO_WARNINGS,
+    FALLBACK_ALLOW_WITH_WARNING,
 )
 from toolguard.error_reporter import report_warning
 from toolguard.issues import Issue
@@ -75,32 +84,88 @@ _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
 #: :meth:`Configuration.assignments_looked_past_when_granting`.
 _LOOKED_PAST_KEY = "assignments_looked_past_when_granting"
 
-_DEFAULT_NO_MATCH_FALLBACK = "ask"
+_DEFAULT_NO_MATCH_FALLBACK = DECISION_ASK
 #: Recognized values for ``no_match_fallback`` after alias normalization --
 #: ``warn_deny`` and ``allow_with_no_warnings`` are accepted spellings that
 #: never appear here (see technical-notes.md for the asymmetry with
 #: ``undecidable_fallback``).
-_VALID_NO_MATCH_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning", "allow"})
+_VALID_NO_MATCH_FALLBACKS = frozenset(
+    {DECISION_ASK, DECISION_DENY, FALLBACK_ALLOW_WITH_WARNING, DECISION_ALLOW}
+)
 
-_DEFAULT_UNDECIDABLE_FALLBACK = "ask"
+_DEFAULT_UNDECIDABLE_FALLBACK = DECISION_ASK
 #: Recognized values for ``undecidable_fallback`` after alias normalization.
-_VALID_UNDECIDABLE_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning", "allow"})
+_VALID_UNDECIDABLE_FALLBACKS = frozenset(
+    {DECISION_ASK, DECISION_DENY, FALLBACK_ALLOW_WITH_WARNING, DECISION_ALLOW}
+)
 
 #: Permanent synonym for ``'allow'`` on both ``*_fallback`` settings -- a
 #: human reminder that silencing the warning was deliberate.
-_ALLOW_NO_WARNINGS_ALIAS = {"allow_with_no_warnings": "allow"}
+_ALLOW_NO_WARNINGS_ALIAS = {FALLBACK_ALLOW_WITH_NO_WARNINGS: DECISION_ALLOW}
 
 #: Human-facing spellings for the unrecognized-value warning's "Accepted
 #: values:" text -- distinct from ``_VALID_*_FALLBACKS``, which hold the
 #: post-alias canonical set. Deliberately excludes the deprecated
 #: ``warn_deny``, which still resolves but should not be advertised.
 _ACCEPTED_FALLBACK_SPELLINGS = (
-    "allow",
-    "allow_with_no_warnings",
-    "allow_with_warning",
-    "ask",
-    "deny",
+    DECISION_ALLOW,
+    FALLBACK_ALLOW_WITH_NO_WARNINGS,
+    FALLBACK_ALLOW_WITH_WARNING,
+    DECISION_ASK,
+    DECISION_DENY,
 )
+
+#: The four top-level ``toolguard_hook`` fallback-setting keys, named once. Public (unlike
+#: most of this module) because :mod:`toolguard.tools.takeover_audit` interpolates them into
+#: finding/remediation text and must not retype the spellings -- see :data:`_FALLBACK_SETTINGS`.
+NO_MATCH_FALLBACK_KEY = "no_match_fallback"
+UNDECIDABLE_FALLBACK_KEY = "undecidable_fallback"
+NO_MATCH_FALLBACK_IN_AUTO_MODE_KEY = "no_match_fallback_in_auto_mode"
+UNDECIDABLE_FALLBACK_IN_AUTO_MODE_KEY = "undecidable_fallback_in_auto_mode"
+
+
+@dataclass(frozen=True)
+class _FallbackSetting:
+    """
+    One 'fallback'-shaped ``toolguard_hook`` setting's declared facts.
+
+    The single registry both :meth:`Configuration.unrecognized_fallback_settings` and
+    the TOO-19 parse-failure-floor invariant test
+    (``test.unit.test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting``,
+    spec section 8) read, so a setting missing from here is invisible to both rather than
+    only to whichever site a human remembered to update.
+
+    Built after :class:`Configuration` (see the bottom of that class' section of this
+    module), not here, so :attr:`resolver` can reference its methods directly rather than
+    naming them as strings.
+
+    Attributes:
+        key: The top-level ``toolguard_hook`` key -- one of the ``*_KEY`` constants above.
+        valid_values: Recognized values after alias normalization.
+        alias_map: Deprecated/synonym spellings normalized before validation.
+        resolver: The bound :class:`Configuration` method that resolves this setting --
+            a callable, not a method name, so a rename breaks this at import time rather
+            than silently at a call site.
+        defers_to: The base setting's ``key`` this one falls back to when unset or
+            unrecognized, or ``None`` when it falls back to a fixed ``'ask'`` instead --
+            only the two original settings have no deferral; every ``'*_in_auto_mode'``
+            setting defers to its base.
+        kind: Which resolution mechanism consumes this setting's value -- ``'no_match'``
+            (the more-specific-wins cascade fold) or ``'undecidable'`` (the compound
+            floor).
+        auto_only: Whether this setting is consulted only when Claude Code's own
+            ``permission_mode`` is the auto mode (``True`` for every ``'*_in_auto_mode'``
+            setting; ``False`` for the two base settings, which apply regardless of mode).
+    """
+
+    key: str
+    valid_values: FrozenSet[str]
+    alias_map: Mapping[str, str]
+    resolver: Callable[["Configuration"], str]
+    defers_to: Optional[str]
+    kind: str
+    auto_only: bool
+
 
 #: ``config_sync`` default values -- the more-specific-wins and
 #: last-occurrence-wins resolvers differ on a conflict, not on these.
@@ -880,8 +945,8 @@ class Configuration:
                     additional_ignored.append(pattern)
 
             # no_match_fallback: more-specific-wins (first definition wins).
-            if no_match_fallback is None and "no_match_fallback" in section:
-                no_match_fallback = section["no_match_fallback"]
+            if no_match_fallback is None and NO_MATCH_FALLBACK_KEY in section:
+                no_match_fallback = section[NO_MATCH_FALLBACK_KEY]
 
         enabled, conflict = self._resolve_takeover_enabled(explicit_enabled)
 
@@ -1311,12 +1376,12 @@ class Configuration:
             ``'allow'``; unset or unrecognized resolves to ``'ask'``.
         """
         return self._resolve_fallback_setting(
-            "no_match_fallback",
+            NO_MATCH_FALLBACK_KEY,
             _VALID_NO_MATCH_FALLBACKS,
             _DEFAULT_NO_MATCH_FALLBACK,
             legacy_alias=lambda: self.takeover_mode().no_match_fallback,
             alias_map={
-                "warn_deny": "allow_with_warning",
+                "warn_deny": FALLBACK_ALLOW_WITH_WARNING,
                 **_ALLOW_NO_WARNINGS_ALIAS,
             },
         )
@@ -1339,9 +1404,55 @@ class Configuration:
             ``'allow'``; unset or unrecognized resolves to ``'ask'``.
         """
         return self._resolve_fallback_setting(
-            "undecidable_fallback",
+            UNDECIDABLE_FALLBACK_KEY,
             _VALID_UNDECIDABLE_FALLBACKS,
             _DEFAULT_UNDECIDABLE_FALLBACK,
+            alias_map=_ALLOW_NO_WARNINGS_ALIAS,
+        )
+
+    def resolved_no_match_fallback_in_auto_mode(self) -> str:
+        """
+        Resolve the effective ``no_match_fallback_in_auto_mode`` (TOO-28) -- the
+        no-match handoff to trust when Claude Code's own ``permission_mode`` is
+        ``'auto'``, a declaration of how much to trust the auto-mode classifier for a
+        command toolguard read but had no rule for.
+
+        Independent of :meth:`resolved_undecidable_fallback_in_auto_mode`: setting one
+        does not change the other. Top-level ``toolguard_hook`` key, most-specific layer
+        wins; no ``[takeover_mode]`` alias (this is a new setting, not a legacy one).
+
+        Returns:
+            One of ``'ask'``, ``'deny'``, ``'allow_with_warning'``, or ``'allow'``.
+            Unset or unrecognized defers to :meth:`resolved_no_match_fallback` --
+            NOT a fixed literal -- so leaving it unset changes nothing.
+        """
+        return self._resolve_fallback_setting(
+            NO_MATCH_FALLBACK_IN_AUTO_MODE_KEY,
+            _VALID_NO_MATCH_FALLBACKS,
+            self.resolved_no_match_fallback(),
+            alias_map=_ALLOW_NO_WARNINGS_ALIAS,
+        )
+
+    def resolved_undecidable_fallback_in_auto_mode(self) -> str:
+        """
+        Resolve the effective ``undecidable_fallback_in_auto_mode`` (TOO-28) -- the
+        undecidable-command handoff to trust when Claude Code's own ``permission_mode``
+        is ``'auto'``, a declaration of how much to trust the auto-mode classifier for a
+        command toolguard could not read at all.
+
+        Independent of :meth:`resolved_no_match_fallback_in_auto_mode`: setting one does
+        not change the other. Top-level ``toolguard_hook`` key, most-specific layer wins;
+        no ``[takeover_mode]`` alias.
+
+        Returns:
+            One of ``'ask'``, ``'deny'``, ``'allow_with_warning'``, or ``'allow'``.
+            Unset or unrecognized defers to :meth:`resolved_undecidable_fallback` --
+            NOT a fixed literal -- so leaving it unset changes nothing.
+        """
+        return self._resolve_fallback_setting(
+            UNDECIDABLE_FALLBACK_IN_AUTO_MODE_KEY,
+            _VALID_UNDECIDABLE_FALLBACKS,
+            self.resolved_undecidable_fallback(),
             alias_map=_ALLOW_NO_WARNINGS_ALIAS,
         )
 
@@ -1351,22 +1462,28 @@ class Configuration:
         """
         Find every layer that sets a ``*_fallback`` key to an unusable value.
 
-        Both :meth:`resolved_no_match_fallback` and
-        :meth:`resolved_undecidable_fallback` fall back to ``'ask'`` when the
-        configured value is not recognized -- the safe direction, and not
-        changed here. Without this diagnostic that failure is silent:
-        ``no_match_fallback = "allow_with_no_warning"`` (singular) would
-        produce maximum-friction ``ask`` behaviour that reads as a broken
+        Iterates :data:`_FALLBACK_SETTINGS` -- the single declared registry of every
+        fallback-shaped setting, also read by the TOO-19 parse-failure-floor invariant
+        test (spec section 8), so a setting missing from the registry is invisible to
+        both rather than only to one of them.
+
+        :meth:`resolved_no_match_fallback` and :meth:`resolved_undecidable_fallback` fall
+        back to ``'ask'`` when the configured value is not recognized; their
+        ``'*_in_auto_mode'`` counterparts (TOO-28) instead defer to the resolved base
+        setting (:attr:`_FallbackSetting.defers_to`), since they have no fixed default of
+        their own. Both are the safe direction and neither is changed here. Without this
+        diagnostic that failure is silent: ``no_match_fallback = "allow_with_no_warning"``
+        (singular) would produce maximum-friction ``ask`` behaviour that reads as a broken
         feature rather than a typo.
 
         Two kinds of unusable value are reported, because both are equally
         silent:
 
         - a string that is not a recognized spelling after the alias map for
-          THAT key -- ``allow_with_no_warnings`` is recognized for both keys,
+          THAT key -- ``allow_with_no_warnings`` is recognized for every key,
           but ``warn_deny`` is recognized (and so never reported) only for
-          ``no_match_fallback``; it IS reported for ``undecidable_fallback``,
-          which has no such alias (see technical-notes.md);
+          ``no_match_fallback``; it IS reported for the other three keys,
+          which have no such alias (see technical-notes.md);
         - a non-string value (a bool, a number, a table). These are treated as
           "not set" by :meth:`_first_toplevel_str_setting`, which is the same
           silent outcome.
@@ -1376,47 +1493,46 @@ class Configuration:
         it becomes live the moment the more-specific level that masks it is
         removed.
 
-        Scope: the TOP-LEVEL ``no_match_fallback`` / ``undecidable_fallback``
-        keys. The deprecated ``[takeover_mode].no_match_fallback`` alias is not
-        covered -- it is resolved through :class:`~toolguard.config_types.TakeoverConfig`,
-        which does not retain per-layer provenance for that field, so it cannot
-        name the file the way this warning must.
+        Scope: the TOP-LEVEL ``no_match_fallback`` / ``undecidable_fallback`` keys and
+        their ``'*_in_auto_mode'`` counterparts. The deprecated
+        ``[takeover_mode].no_match_fallback`` alias is not covered -- it is resolved
+        through :class:`~toolguard.config_types.TakeoverConfig`, which does not retain
+        per-layer provenance for that field, so it cannot name the file the way this
+        warning must.
 
         Returns:
-            Tuple of :class:`~toolguard.config_types.UnrecognizedFallbackSetting`,
-            in layer order (most-specific first), ``no_match_fallback`` before
-            ``undecidable_fallback`` within a layer.
+            Tuple of :class:`~toolguard.config_types.UnrecognizedFallbackSetting`, in
+            layer order (most-specific first), then registry order within a layer.
         """
-        valid_by_key = {
-            "no_match_fallback": _VALID_NO_MATCH_FALLBACKS,
-            "undecidable_fallback": _VALID_UNDECIDABLE_FALLBACKS,
-        }
-        alias_by_key = {
-            "no_match_fallback": {
-                "warn_deny": "allow_with_warning",
-                **_ALLOW_NO_WARNINGS_ALIAS,
-            },
-            "undecidable_fallback": dict(_ALLOW_NO_WARNINGS_ALIAS),
-        }
         found: List[UnrecognizedFallbackSetting] = []
         for layer in self.layers:
             if layer.is_native:
                 continue
-            for key, valid_values in valid_by_key.items():
-                if key not in layer.content:
+            for setting in _FALLBACK_SETTINGS:
+                if setting.key not in layer.content:
                     continue
-                raw = layer.content[key]
+                raw = layer.content[setting.key]
                 normalized = (
-                    alias_by_key[key].get(raw, raw) if isinstance(raw, str) else raw
+                    setting.alias_map.get(raw, raw) if isinstance(raw, str) else raw
                 )
-                if isinstance(normalized, str) and normalized in valid_values:
+                if isinstance(normalized, str) and normalized in setting.valid_values:
                     continue
+                if setting.defers_to is None:
+                    falls_back_to = "'ask'"
+                else:
+                    base = _FALLBACK_SETTINGS_BY_KEY[setting.defers_to]
+                    resolved_base = base.resolver(self)
+                    falls_back_to = (
+                        f"the non-auto {setting.defers_to} "
+                        f"(currently {resolved_base!r})"
+                    )
                 found.append(
                     UnrecognizedFallbackSetting(
-                        key=key,
+                        key=setting.key,
                         value=str(raw),
                         provenance=layer.provenance,
                         accepted=_ACCEPTED_FALLBACK_SPELLINGS,
+                        falls_back_to=falls_back_to,
                     )
                 )
         return tuple(found)
@@ -1693,8 +1809,9 @@ class Configuration:
         """
         One 'warning' Issue per :meth:`unrecognized_fallback_settings` entry
         -- a ``*_fallback`` value toolguard does not recognize. A 'warning',
-        not an 'error': resolution falls back to 'ask', the safe direction,
-        but that is indistinguishable from a broken feature without this.
+        not an 'error': resolution falls back to a safe value (see
+        :attr:`~toolguard.config_types.UnrecognizedFallbackSetting.falls_back_to`), but
+        that is indistinguishable from a broken feature without this.
         """
         return tuple(
             Issue(
@@ -1702,8 +1819,7 @@ class Configuration:
                 message=bad.describe(),
                 corrective_steps=(
                     f"Set {bad.key} to one of: {', '.join(bad.accepted)}. "
-                    f"Until then it resolves to 'ask', which prompts for "
-                    f"everything the setting was meant to decide."
+                    f"Until then it resolves to {bad.falls_back_to}."
                 ),
             )
             for bad in self.unrecognized_fallback_settings()
@@ -1912,6 +2028,56 @@ class Configuration:
             Tuple of ``"<level>: <path>"`` strings.
         """
         return tuple(layer.provenance.describe_brief() for layer in self.layers)
+
+
+#: See :class:`_FallbackSetting`. Built here, after :class:`Configuration`, so
+#: ``resolver`` can reference its methods directly.
+_FALLBACK_SETTINGS: Tuple[_FallbackSetting, ...] = (
+    _FallbackSetting(
+        key=NO_MATCH_FALLBACK_KEY,
+        valid_values=_VALID_NO_MATCH_FALLBACKS,
+        alias_map=MappingProxyType(
+            {"warn_deny": FALLBACK_ALLOW_WITH_WARNING, **_ALLOW_NO_WARNINGS_ALIAS}
+        ),
+        resolver=Configuration.resolved_no_match_fallback,
+        defers_to=None,
+        kind="no_match",
+        auto_only=False,
+    ),
+    _FallbackSetting(
+        key=UNDECIDABLE_FALLBACK_KEY,
+        valid_values=_VALID_UNDECIDABLE_FALLBACKS,
+        alias_map=MappingProxyType(dict(_ALLOW_NO_WARNINGS_ALIAS)),
+        resolver=Configuration.resolved_undecidable_fallback,
+        defers_to=None,
+        kind="undecidable",
+        auto_only=False,
+    ),
+    _FallbackSetting(
+        key=NO_MATCH_FALLBACK_IN_AUTO_MODE_KEY,
+        valid_values=_VALID_NO_MATCH_FALLBACKS,
+        alias_map=MappingProxyType(dict(_ALLOW_NO_WARNINGS_ALIAS)),
+        resolver=Configuration.resolved_no_match_fallback_in_auto_mode,
+        defers_to=NO_MATCH_FALLBACK_KEY,
+        kind="no_match",
+        auto_only=True,
+    ),
+    _FallbackSetting(
+        key=UNDECIDABLE_FALLBACK_IN_AUTO_MODE_KEY,
+        valid_values=_VALID_UNDECIDABLE_FALLBACKS,
+        alias_map=MappingProxyType(dict(_ALLOW_NO_WARNINGS_ALIAS)),
+        resolver=Configuration.resolved_undecidable_fallback_in_auto_mode,
+        defers_to=UNDECIDABLE_FALLBACK_KEY,
+        kind="undecidable",
+        auto_only=True,
+    ),
+)
+
+#: :data:`_FALLBACK_SETTINGS` keyed by ``key``, for deferral lookups (see
+#: :meth:`Configuration.unrecognized_fallback_settings`).
+_FALLBACK_SETTINGS_BY_KEY: Mapping[str, _FallbackSetting] = MappingProxyType(
+    {setting.key: setting for setting in _FALLBACK_SETTINGS}
+)
 
 
 def _multiline_structured_entry_diagnostic(

@@ -24,6 +24,7 @@ import fnmatch
 from typing import List, Optional, Sequence, Tuple
 
 from .config_types import CommandSpellings, LevelMatch
+from .constants import DECISION_ALLOW, DECISION_ASK, DECISION_DENY
 from .patterns import parse_pattern, match_pattern, PatternType
 from .normalization import expand_tilde_in_command, normalize_command, normalize_path
 
@@ -310,7 +311,7 @@ def check_hard_deny(
             return None
 
     return LevelMatch(
-        decision="deny",
+        decision=DECISION_DENY,
         reason=f"Command matches hard_deny pattern: {pattern} (cannot be overridden)",
         matched_pattern=pattern,
     )
@@ -343,15 +344,15 @@ def check_permission(
             command, deny_patterns, extended_syntax, also_spelled=spellings.restricting
         )
         if matched:
-            return "deny", f"Command matches deny pattern: {pattern}"
+            return DECISION_DENY, f"Command matches deny pattern: {pattern}"
 
     matched, pattern = match_command(
         command, allow_patterns, extended_syntax, also_spelled=spellings.granting
     )
     if matched:
-        return "allow", f"Command matches allow pattern: {pattern}"
+        return DECISION_ALLOW, f"Command matches allow pattern: {pattern}"
 
-    return "deny", "Command does not match any allow patterns"
+    return DECISION_DENY, "Command does not match any allow patterns"
 
 
 def is_universal_pattern(pattern: str) -> bool:
@@ -416,15 +417,15 @@ def resolve_allow_ask(
     allow_match, allow_pat = allow_hit
     ask_match, ask_pat = ask_hit
     if ask_match and not allow_match:
-        return "ask", ask_pat
+        return DECISION_ASK, ask_pat
     if allow_match and not ask_match:
-        return "allow", allow_pat
+        return DECISION_ALLOW, allow_pat
     if allow_match and ask_match:
         if _literal_prefix_specificity(allow_pat) > _literal_prefix_specificity(
             ask_pat
         ):
-            return "allow", allow_pat
-        return "ask", ask_pat
+            return DECISION_ALLOW, allow_pat
+        return DECISION_ASK, ask_pat
     return None
 
 
@@ -468,7 +469,7 @@ def decide_command_at_level_detailed(
         )
         if matched:
             return LevelMatch(
-                decision="deny",
+                decision=DECISION_DENY,
                 reason=f"Command matches deny pattern: {pattern}",
                 matched_pattern=pattern,
             )

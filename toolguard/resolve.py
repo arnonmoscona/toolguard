@@ -24,10 +24,18 @@ from toolguard.compound import (
     decompose,
     judge_unit,
 )
+from toolguard.config_types import AUTO_PERMISSION_MODE
 from toolguard.config_types import ConflictOverride
 from toolguard.config_types import LevelMatch as LevelMatch
 from toolguard.config_types import RuntimeVerdict as RuntimeVerdict
 from toolguard.config_types import UnitVerdict as UnitVerdict
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    FALLBACK_OUTCOME_SILENT,
+    FALLBACK_OUTCOME_WARNED,
+)
 from toolguard.file_matching import check_file_path_hard_deny
 from toolguard.invocation import Invocation
 from toolguard.parser.command_extractor import command_spellings
@@ -129,7 +137,7 @@ def resolve_file_path_permission_detailed(
         # File paths have no undecidable_fallback concept, so
         # permission_resolution.py never sets this today -- threaded through
         # regardless, rather than silently dropped, in case it ever does.
-        fallback_kind=resolved.fallback_kind,
+        fallback_outcome=resolved.fallback_outcome,
         # 'no_match' when unclamped resolution's own no-match branch decided
         # (or None for a genuine match) -- carried, not re-derived.
         fallback_cause=resolved.fallback_cause,
@@ -184,17 +192,17 @@ def _deciding_sub_match(
         The deciding :class:`UnitVerdict`, or ``None`` when there is no single
         decider to attribute.
     """
-    if decision in ("deny", "ask"):
+    if decision in (DECISION_DENY, DECISION_ASK):
         for sub_match in sub_matches:
             if not sub_match.audit_only and sub_match.decision == decision:
                 return sub_match
         return None
-    if decision == "allow":
+    if decision == DECISION_ALLOW:
         genuine = [
             sub_match
             for sub_match in sub_matches
             if not sub_match.audit_only
-            and sub_match.decision == "allow"
+            and sub_match.decision == DECISION_ALLOW
             and sub_match.matched_rule is not None
         ]
         if len(genuine) == 1:
@@ -215,7 +223,9 @@ def resolve_bash_permission_detailed(
     :func:`toolguard.compound._combine_strictest`. Foreign inline code /
     heredoc sinks and undecidable segments (control structures, process
     substitution) that cannot be safely decomposed are floored per
-    ``config.resolved_undecidable_fallback()`` -- see
+    ``config.resolved_undecidable_fallback()`` (or its auto-mode counterpart,
+    ``resolved_undecidable_fallback_in_auto_mode()``, when
+    ``invocation.permission_mode`` is the auto mode -- TOO-28) -- see
     :func:`toolguard.compound.judge_unit`.
 
     Allow-over-deny overrides discovered on any sub-command are returned so
@@ -224,11 +234,11 @@ def resolve_bash_permission_detailed(
 
     Args:
         command: The bash command line (may be compound).
-        invocation: Supplies ``config`` and ``extended_syntax``. The Bash
-            hard-deny pool is looked up from ``invocation.config`` here --
-            always ``config.hard_deny("Bash")``, never the caller's own
-            ``tool_name`` (an MCP terminal tool is still checked under the
-            Bash pool; see :mod:`toolguard.api`).
+        invocation: Supplies ``config``, ``extended_syntax``, and
+            ``permission_mode``. The Bash hard-deny pool is looked up from
+            ``invocation.config`` here -- always ``config.hard_deny("Bash")``,
+            never the caller's own ``tool_name`` (an MCP terminal tool is
+            still checked under the Bash pool; see :mod:`toolguard.api`).
 
     Returns:
         A :class:`~toolguard.config_types.RuntimeVerdict` (see that class's
@@ -246,6 +256,11 @@ def resolve_bash_permission_detailed(
     overrides: List[Tuple[str, ConflictOverride]] = []
     sub_matches: List[UnitVerdict] = []
     looked_past = invocation.config.assignments_looked_past_when_granting()
+    undecidable_fallback = (
+        invocation.config.resolved_undecidable_fallback_in_auto_mode()
+        if invocation.permission_mode == AUTO_PERMISSION_MODE
+        else invocation.config.resolved_undecidable_fallback()
+    )
 
     def _decide(sub_command: str) -> Tuple[UnitVerdict, Optional[ConflictOverride]]:
         """Resolve one sub-command: hard-deny pool first, then the cascade."""
@@ -268,7 +283,7 @@ def resolve_bash_permission_detailed(
                     additional_context=_hard_deny_additional_context(
                         bash_context, hard.matched_pattern
                     ),
-                    fallback_kind=None,  # hard-deny is always a genuine match, never an escape hatch
+                    fallback_outcome=None,  # hard-deny is always a genuine match, never an escape hatch
                 ),
                 None,  # override
             )
@@ -276,9 +291,13 @@ def resolve_bash_permission_detailed(
         resolved = resolve_command_permission(
             bash_context, sub_command, spellings=spellings
         )
-        fallback_kind = None
-        if resolved.decision == "allow" and resolved.matched_rule is None:
-            fallback_kind = "warned" if resolved.fallback_warning else "silent"
+        fallback_outcome = None
+        if resolved.decision == DECISION_ALLOW and resolved.matched_rule is None:
+            fallback_outcome = (
+                FALLBACK_OUTCOME_WARNED
+                if resolved.fallback_warning
+                else FALLBACK_OUTCOME_SILENT
+            )
         override = resolved.overrides[0][1] if resolved.overrides else None
         return (
             UnitVerdict(
@@ -288,7 +307,7 @@ def resolve_bash_permission_detailed(
                 provenance=resolved.provenance,
                 reason=resolved.reason,
                 additional_context=resolved.additional_context,
-                fallback_kind=fallback_kind,
+                fallback_outcome=fallback_outcome,
                 # Carried, not re-derived: resolved.fallback_cause was set
                 # structurally by permission_resolution.py's own no-match
                 # branch (or left None for a genuine match), independent of
@@ -307,7 +326,7 @@ def resolve_bash_permission_detailed(
             part_verdicts.append(verdict)
             if (
                 not unit.audits_as_one
-                and verdict.decision == "allow"
+                and verdict.decision == DECISION_ALLOW
                 and override is not None
             ):
                 # Gate on the same `audits_as_one` field that governs
@@ -331,7 +350,7 @@ def resolve_bash_permission_detailed(
             audit_verdict, audit_override = _decide(audit_part)
             audit_verdict = replace(audit_verdict, audit_only=True)
             audit_part_verdicts.append(audit_verdict)
-            if audit_verdict.decision == "allow" and audit_override is not None:
+            if audit_verdict.decision == DECISION_ALLOW and audit_override is not None:
                 overrides.append((audit_part, audit_override))
         # deny_check_parts (only ever non-empty for 'inline_code') are every
         # OTHER substitution -- resolved here too, so a genuine deny or ask
@@ -345,12 +364,15 @@ def resolve_bash_permission_detailed(
             candidate_verdict, candidate_override = _decide(candidate)
             candidate_verdict = replace(candidate_verdict, audit_only=True)
             deny_check_verdicts.append(candidate_verdict)
-            if candidate_verdict.decision == "allow" and candidate_override is not None:
+            if (
+                candidate_verdict.decision == DECISION_ALLOW
+                and candidate_override is not None
+            ):
                 overrides.append((candidate, candidate_override))
         judged = judge_unit(
             unit,
             part_verdicts,
-            invocation.config.resolved_undecidable_fallback(),
+            undecidable_fallback,
             audit_part_verdicts=audit_part_verdicts,
             deny_check_verdicts=deny_check_verdicts,
         )
@@ -366,7 +388,9 @@ def resolve_bash_permission_detailed(
             sub_matches.append(judged)
             sub_matches.extend(audit_part_verdicts)
             sub_matches.extend(
-                v for v in deny_check_verdicts if v.decision in ("deny", "ask")
+                v
+                for v in deny_check_verdicts
+                if v.decision in (DECISION_DENY, DECISION_ASK)
             )
         else:
             sub_matches.extend(part_verdicts)
@@ -377,7 +401,7 @@ def resolve_bash_permission_detailed(
         # wording; use the same reason text
         # resolve_compound_permission_detailed's equivalent guard uses.
         combined = RuntimeVerdict(
-            decision="deny", reason="No valid commands found in command line"
+            decision=DECISION_DENY, reason="No valid commands found in command line"
         )
     else:
         combined = _combine_strictest(unit_verdicts)
@@ -405,7 +429,7 @@ def resolve_bash_permission_detailed(
     # clear them otherwise. fallback_warning is cleared here too because the
     # parse-failure floor above can clamp 'allow' down to 'ask', and a
     # since-overridden verdict must not still claim a WARNING-stream entry.
-    if decision != "allow":
+    if decision != DECISION_ALLOW:
         overrides = []
         fallback_warning = False
     deciding = _deciding_sub_match(decision, sub_matches)
@@ -418,10 +442,10 @@ def resolve_bash_permission_detailed(
         additional_context=cap_context_words(additional_context),
         fallback_warning=fallback_warning,
         matched_rule=deciding.matched_rule if deciding is not None else None,
-        # combined.fallback_kind is already None whenever combined.decision
+        # combined.fallback_outcome is already None whenever combined.decision
         # != 'deny', and the parse-failure floor above never turns a 'deny'
         # into anything else, so this survives the floor unchanged.
-        fallback_kind=combined.fallback_kind,
+        fallback_outcome=combined.fallback_outcome,
         fallback_cause=combined.fallback_cause,
         tool="Bash",
         target=command,

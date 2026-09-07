@@ -36,6 +36,7 @@ from toolguard.claude_code_contract import (
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
+from toolguard.config_types import AUTO_PERMISSION_MODE
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_conflict, log_crash, log_error, log_warning
 from toolguard.error_reporter import Reporter
@@ -55,7 +56,13 @@ from toolguard.resolve import (
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
 )
-from toolguard.constants import DEFAULT_COMMAND_PAYLOAD_KEY, FILE_TOOLS
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    DEFAULT_COMMAND_PAYLOAD_KEY,
+    FILE_TOOLS,
+)
 from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
 from toolguard.tool_spec import KNOWN_TOOL_NAMES
@@ -382,38 +389,38 @@ def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
 
 
 def _reason_suffix_or_placeholder(
-    fallback_kind: Optional[str], placeholder: str, matched_rule: Optional[str]
+    fallback_outcome: Optional[str], placeholder: str, matched_rule: Optional[str]
 ) -> Optional[str]:
     """
-    Return *matched_rule*, or *placeholder* when *fallback_kind* names a fallback escape hatch.
+    Return *matched_rule*, or *placeholder* when *fallback_outcome* names a fallback escape hatch.
 
     A fallback escape-hatch reason ends in the same ``": <text>"`` shape as a
     genuine rule-match reason, but the text is a truncated display command,
     not a pattern -- e.g. ``Denied by undecidable_fallback=deny (...): python
     -c``. Crediting that text to a rule would fabricate an attribution for a
     rule that does not exist in the config.
-    :attr:`~toolguard.config_types.RuntimeVerdict.fallback_kind` is the
+    :attr:`~toolguard.config_types.RuntimeVerdict.fallback_outcome` is the
     structural fact that tells the two shapes apart -- computed at the point
     the outcome was decided, never re-derived from *reason* here. The allow
-    side reads the per-unit :attr:`~toolguard.config_types.UnitVerdict.fallback_kind`
+    side reads the per-unit :attr:`~toolguard.config_types.UnitVerdict.fallback_outcome`
     instead (see :func:`_unit_matched_rule_for_log`).
 
     Args:
-        fallback_kind: The verdict's own
-            :attr:`~toolguard.config_types.RuntimeVerdict.fallback_kind` --
+        fallback_outcome: The verdict's own
+            :attr:`~toolguard.config_types.RuntimeVerdict.fallback_outcome` --
             ``'denied'`` for the ``undecidable_fallback=deny`` escape hatch,
             else ``None``.
-        placeholder: What to return when *fallback_kind* names a fallback
+        placeholder: What to return when *fallback_outcome* names a fallback
             escape hatch instead of a genuine rule match.
         matched_rule: The structured matched-rule value already resolved by
             the caller (``None`` when no rule matched).
 
     Returns:
-        *placeholder* when *fallback_kind* is not ``None``, otherwise
+        *placeholder* when *fallback_outcome* is not ``None``, otherwise
         *matched_rule* unchanged (which may itself be ``None`` -- an absent
         record beats a false one either way).
     """
-    if fallback_kind is not None:
+    if fallback_outcome is not None:
         return placeholder
     return matched_rule
 
@@ -438,21 +445,21 @@ def _unit_matched_rule_for_log(unit: UnitVerdict) -> Optional[str]:
     """
     Derive the ``Matched Rule`` audit-log field for one sub-command's unit verdict.
 
-    Reads :attr:`~toolguard.config_types.UnitVerdict.fallback_kind` directly,
+    Reads :attr:`~toolguard.config_types.UnitVerdict.fallback_outcome` directly,
     at the UNIT altitude -- the counterpart to
     :func:`_reason_suffix_or_placeholder`'s RUNTIME-altitude read of
-    :attr:`~toolguard.config_types.RuntimeVerdict.fallback_kind`.
+    :attr:`~toolguard.config_types.RuntimeVerdict.fallback_outcome`.
 
     Args:
         unit: The sub-command's resolved :class:`~toolguard.config_types.UnitVerdict`.
 
     Returns:
         :data:`~toolguard.compound.FALLBACK_ALLOW_PLACEHOLDER` when
-        ``unit.fallback_kind`` names an allow-side escape hatch (``'warned'``
+        ``unit.fallback_outcome`` names an allow-side escape hatch (``'warned'``
         or ``'silent'``), otherwise ``unit.matched_rule`` unchanged (which
         may itself be ``None`` -- an absent record beats a false one).
     """
-    if unit.fallback_kind in ("warned", "silent"):
+    if unit.fallback_outcome in ("warned", "silent"):
         return FALLBACK_ALLOW_PLACEHOLDER
     return unit.matched_rule
 
@@ -501,7 +508,7 @@ def _log_allowed_command(
         # The normal path for a file-path verdict (sub_matches is always
         # empty there) and a defensive fallback for a synthetic/hand-built
         # Bash verdict -- log what is in hand without the placeholder guard
-        # below, since there is no per-unit fallback_kind to consult.
+        # below, since there is no per-unit fallback_outcome to consult.
         log_command(
             LogRecord(
                 command_str=log_target,
@@ -616,7 +623,7 @@ def _governed_tool_verdict(
     """
     if not governed_tools:
         return RuntimeVerdict(
-            decision="deny",
+            decision=DECISION_DENY,
             reason=(
                 "No governed tools are configured: no built-in tools are "
                 "registered. This is not a valid 'govern nothing' "
@@ -627,7 +634,7 @@ def _governed_tool_verdict(
         )
     if tool_name not in governed_tools:
         return RuntimeVerdict(
-            decision="allow",
+            decision=DECISION_ALLOW,
             reason=f"Not a governed tool (governed: {', '.join(governed_tools)})",
         )
     return None
@@ -679,7 +686,7 @@ def _resolve_event(invocation: Invocation) -> RuntimeVerdict:
     target = invocation.tool_input.get(key, "")
     if not target:
         return RuntimeVerdict(
-            decision="deny", reason=f"No {key} provided in tool input"
+            decision=DECISION_DENY, reason=f"No {key} provided in tool input"
         )
 
     return decide(
@@ -730,21 +737,24 @@ def _run_eval_mode() -> None:
         _emit_decision(
             create_hook_output(
                 RuntimeVerdict(
-                    decision="deny", reason=f"Failed to parse hook input: {str(e)}"
+                    decision=DECISION_DENY,
+                    reason=f"Failed to parse hook input: {str(e)}",
                 )
             )
         )
     except ValueError as e:
         _emit_decision(
             create_hook_output(
-                RuntimeVerdict(decision="deny", reason=f"Invalid hook input: {str(e)}")
+                RuntimeVerdict(
+                    decision=DECISION_DENY, reason=f"Invalid hook input: {str(e)}"
+                )
             )
         )
     except Exception as e:
         _emit_decision(
             create_hook_output(
                 RuntimeVerdict(
-                    decision="deny", reason=f"Unexpected error in hook: {str(e)}"
+                    decision=DECISION_DENY, reason=f"Unexpected error in hook: {str(e)}"
                 )
             )
         )
@@ -918,20 +928,20 @@ def _log_non_allow_decision(
     reason text -- never split, so it carries no fabrication risk regardless
     of the reason's shape. A deny records the violated rule from
     ``verdict.matched_rule`` via :func:`_reason_suffix_or_placeholder`, keyed
-    off ``verdict.fallback_kind`` (see that function's docstring for the
+    off ``verdict.fallback_outcome`` (see that function's docstring for the
     escape-hatch/placeholder mechanism). Unlike the allow side, when
-    ``verdict.matched_rule`` is ``None`` and ``verdict.fallback_kind`` is
+    ``verdict.matched_rule`` is ``None`` and ``verdict.fallback_outcome`` is
     also ``None``, the full reason is used (not ``None``) -- this covers
     reasons like ``"No commands to evaluate"`` that never named a rule at
     all.
 
     Args:
-        verdict: The resolved 'ask' or deny verdict. ``fallback_kind`` drives
+        verdict: The resolved 'ask' or deny verdict. ``fallback_outcome`` drives
             :func:`_reason_suffix_or_placeholder`'s classification (the
             'ask' branch instead uses ``reason`` verbatim as the log note).
             ``provenance`` is rendered via :func:`_provenance_brief`,
             suppressed the same way as ``matched_rule`` when
-            ``fallback_kind`` names a fallback escape hatch (never paired
+            ``fallback_outcome`` names a fallback escape hatch (never paired
             with a rule that did not actually decide the verdict), and
             naturally absent for a hard deny (pooled across levels, no
             single provenance).
@@ -940,10 +950,13 @@ def _log_non_allow_decision(
             log entry (the latter for diagnosis only, see :func:`main`);
             ``env_config`` names the log stream.
     """
-    if verdict.decision == "ask":
+    if verdict.decision == DECISION_ASK:
         log_command(
             LogRecord(
                 command_str=log_target,
+                # LogRecord.status is its OWN vocabulary ('executed'/'refused'/'ask',
+                # see LogRecord's own docstring) -- 'ask' here is not DECISION_ASK,
+                # it coincidentally shares the same spelling.
                 status="ask",
                 note=verdict.reason,
                 extra_info=invocation.agent_info,
@@ -955,11 +968,11 @@ def _log_non_allow_decision(
         return
 
     # Use the structured violated rule for logging -- an absent/generic
-    # record beats a false one when fallback_kind names a fallback escape
+    # record beats a false one when fallback_outcome names a fallback escape
     # hatch rather than a matched rule. Provenance is suppressed the same way
     # (see the Args docstring above).
     suffix = _reason_suffix_or_placeholder(
-        verdict.fallback_kind,
+        verdict.fallback_outcome,
         FALLBACK_DENY_PLACEHOLDER,
         verdict.matched_rule,
     )
@@ -981,13 +994,6 @@ def _log_non_allow_decision(
         ),
         config=invocation.env_config,
     )
-
-
-#: The one Claude Code permission mode the auto-mode trace triggers on
-#: (TOO-28 spec 4.4). Not 'plan': Claude Code's own plan mode is meant to be
-#: read-only, so it is not the "less-governed" case this trace exists to
-#: surface (Arnon, 2026-09-06).
-AUTO_PERMISSION_MODE = "auto"
 
 
 def _fallback_decided(result: RuntimeVerdict) -> bool:
@@ -1028,9 +1034,9 @@ def _classify_fallback_cause(result: RuntimeVerdict, invocation: Invocation) -> 
     point of decision, in :mod:`toolguard.permission_resolution`/
     :mod:`toolguard.compound`/:mod:`toolguard.resolve` -- rather than
     re-deriving it here. An earlier version of this function tried to infer
-    the cause from ``fallback_kind`` downstream and produced a wrong label;
-    see :attr:`~toolguard.config_types.UnitVerdict.fallback_kind`'s own
-    docstring for why that field cannot answer this question.
+    the cause from ``fallback_outcome`` downstream and produced a wrong
+    label; see :attr:`~toolguard.config_types.UnitVerdict.fallback_outcome`'s
+    own docstring for why that field cannot answer this question.
 
     ``parse_failure`` is the one exception, checked independently via
     ``invocation.config.parse_failures`` rather than read off *result*:
@@ -1057,7 +1063,7 @@ def _classify_fallback_cause(result: RuntimeVerdict, invocation: Invocation) -> 
     parse_failures = (
         invocation.config.parse_failures if invocation.config is not None else ()
     )
-    if parse_failures and result.decision != "deny":
+    if parse_failures and result.decision != DECISION_DENY:
         return FALLBACK_CAUSE_PARSE_FAILURE
     if result.fallback_cause == "undecidable":
         return FALLBACK_CAUSE_UNDECIDABLE
@@ -1073,8 +1079,10 @@ def _maybe_trace_auto_mode(
     Record *result* to the auto-mode trace (TOO-28 spec 4.4), if it qualifies.
 
     Fires only when Claude Code's own ``permission_mode`` is
-    :data:`AUTO_PERMISSION_MODE` AND a fallback (not a matched rule)
-    decided *result* -- see :func:`_fallback_decided`. This is a read-only
+    :data:`~toolguard.config_types.AUTO_PERMISSION_MODE` AND a fallback (not a matched
+    rule) decided *result* -- see :func:`_fallback_decided`. Not ``'plan'``: Claude
+    Code's own plan mode is meant to be read-only, so it is not the "less-governed" case
+    this trace exists to surface. This is a read-only
     side channel: :func:`~toolguard.auto_mode_trace.log_auto_mode_trace`
     already swallows its own write failures, and the call here is wrapped
     too, as a second safety net -- an unexpected bug in the tracing path
@@ -1145,13 +1153,13 @@ def _handle_file_path_tool(invocation: Invocation) -> RuntimeVerdict:
             config=invocation.env_config,
         )
         return RuntimeVerdict(
-            decision="deny", reason=f"No {key} provided in tool input"
+            decision=DECISION_DENY, reason=f"No {key} provided in tool input"
         )
 
     result = resolve_file_path_permission_detailed(file_path, invocation)
     log_target = f"{invocation.tool_name}({file_path})"
 
-    if result.decision == "allow":
+    if result.decision == DECISION_ALLOW:
         # Conflict: a more-specific allow overrode a less-specific deny. A
         # file-path result carries 0 or 1 overrides in this always-a-list
         # field, so this loop runs 0 or 1 times.
@@ -1214,12 +1222,12 @@ def _handle_command_tool(invocation: Invocation) -> RuntimeVerdict:
             config=invocation.env_config,
         )
         return RuntimeVerdict(
-            decision="deny", reason=f"No {key} provided in tool input"
+            decision=DECISION_DENY, reason=f"No {key} provided in tool input"
         )
 
     result = resolve_bash_permission_detailed(command, invocation)
 
-    if result.decision == "allow":
+    if result.decision == DECISION_ALLOW:
         # Conflict logging: any sub-command whose more-specific allow overrode
         # a less-specific deny is recorded to the conflict stream.
         conflict_log_dir = invocation.env_config.get("log_dir")
@@ -1377,9 +1385,9 @@ def main() -> None:
             agent_info = _agent_info_for(hook_data.transcript_path)
 
             # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
-            # mode) is recorded alongside the decision, purely for diagnosis --
-            # it never affects the verdict itself.
-            # TOO-28-SCAFFOLD: the sentence above stops being true in Phase 2.
+            # mode) is recorded alongside the decision AND, when it is the auto
+            # mode, selects the '*_in_auto_mode' fallback settings if configured
+            # (TOO-28) -- see permission_resolution.py/resolve.py.
             permission_mode = hook_data.permission_mode
 
             invocation = replace(
@@ -1418,7 +1426,7 @@ def main() -> None:
             log_crash(e, crash_context, caught_as="json.JSONDecodeError")
             _report_crash_fault(reporter, error_reason)
             output = _finalize_output(
-                RuntimeVerdict(decision="deny", reason=error_reason), reporter
+                RuntimeVerdict(decision=DECISION_DENY, reason=error_reason), reporter
             )
             _emit_decision(output)
             sys.exit(0)
@@ -1429,7 +1437,7 @@ def main() -> None:
             log_crash(e, _build_crash_context(locals()), caught_as="ValueError")
             _report_crash_fault(reporter, error_reason)
             output = _finalize_output(
-                RuntimeVerdict(decision="deny", reason=error_reason), reporter
+                RuntimeVerdict(decision=DECISION_DENY, reason=error_reason), reporter
             )
             _emit_decision(output)
             sys.exit(0)
@@ -1444,7 +1452,7 @@ def main() -> None:
             )
             _report_crash_fault(reporter, error_reason)
             output = _finalize_output(
-                RuntimeVerdict(decision="deny", reason=error_reason), reporter
+                RuntimeVerdict(decision=DECISION_DENY, reason=error_reason), reporter
             )
             _emit_decision(output)
             sys.exit(0)

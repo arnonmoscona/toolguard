@@ -237,6 +237,8 @@ the SAME severity, never a lower one, since it is the less-safe of the two. See
 `undecidable_fallback = "deny"`, by contrast, raises no finding: it is strictly more
 conservative than the `"ask"` default, not a loosening.
 
+**Everything above applies identically to `undecidable_fallback_in_auto_mode`** (see [Configuration: Fallback settings in auto mode](configuration.md#fallback-settings-in-auto-mode)), except that the loosening only takes effect while Claude Code's own `permission_mode` is auto -- the mechanics, the residual risk, and the `loose-undecidable-fallback-in-auto-mode` finding it raises are otherwise the same trade.
+
 ## A broken config file also fails safe, not open
 
 A syntax error in any single `toolguard_hook.toml`/`.json` file (project, user, or a rules-directory

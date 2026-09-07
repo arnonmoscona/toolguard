@@ -66,7 +66,7 @@ def _shape(sub_match):
         sub_match.sub_command,
         sub_match.decision,
         sub_match.matched_rule,
-        sub_match.fallback_kind,
+        sub_match.fallback_outcome,
     )
 
 
@@ -133,7 +133,7 @@ class TestSubMatchesCharacterization(unittest.TestCase):
         Then sub_matches has exactly one entry, keyed to the leaf's real,
             full text (never the truncated outer-command stub), with
             matched_rule always None (an escape hatch, never a genuine
-            attribution) and fallback_kind naming the escape hatch
+            attribution) and fallback_outcome naming the escape hatch
         """
         command = 'python3 -c "import os"'
         expected = {
@@ -142,14 +142,14 @@ class TestSubMatchesCharacterization(unittest.TestCase):
             "allow_with_warning": ("allow", None, "warned"),
             "allow": ("allow", None, "silent"),
         }
-        for fallback, (decision, matched_rule, fallback_kind) in expected.items():
+        for fallback, (decision, matched_rule, fallback_outcome) in expected.items():
             with self.subTest(fallback=fallback):
                 config = _config(allow=["python3 -c:*"], fallback=fallback)
                 result = _resolve(config, command)
                 self.assertEqual(result.decision, decision)
                 self.assertEqual(
                     [_shape(sm) for sm in result.sub_matches],
-                    [(command, decision, matched_rule, fallback_kind)],
+                    [(command, decision, matched_rule, fallback_outcome)],
                 )
 
     def test_undecidable_segment_plus_plain_leaf(self):
@@ -406,21 +406,21 @@ class TestUnitFromResult(unittest.TestCase):
     """``_unit_from_result``'s own unit tests.
 
     Superseded ``TestUnitFromTuple`` (TOO-45 ticket 38): the old class pinned
-    ``_unit_from_tuple`` deriving ``fallback_kind`` by substring-matching
+    ``_unit_from_tuple`` deriving ``fallback_outcome`` by substring-matching
     canned reason text via the now-deleted ``fallback_kind_for_reason`` --
     exactly the prose-parsing anti-pattern the ticket removes. The
-    replacement pins the new contract instead: ``fallback_kind`` is read
+    replacement pins the new contract instead: ``fallback_outcome`` is read
     from the caller-supplied :class:`ResolveOneResult` verbatim, never
     derived from *reason*.
     """
 
     def test_wraps_a_plain_allow_result(self):
         """
-        Given an allow ResolveOneResult with no fallback_kind
+        Given an allow ResolveOneResult with no fallback_outcome
         When _unit_from_result adapts it
         Then the resulting UnitVerdict carries the sub_command, decision,
              reason, and additional_context verbatim, with matched_rule,
-             provenance, and fallback_kind all None
+             provenance, and fallback_outcome all None
         """
         unit = _unit_from_result(
             "git status",
@@ -432,30 +432,30 @@ class TestUnitFromResult(unittest.TestCase):
         self.assertEqual(unit.additional_context, "note")
         self.assertIsNone(unit.matched_rule)
         self.assertIsNone(unit.provenance)
-        self.assertIsNone(unit.fallback_kind)
+        self.assertIsNone(unit.fallback_outcome)
 
-    def test_fallback_kind_is_read_verbatim_never_derived_from_reason(self):
+    def test_fallback_outcome_is_read_verbatim_never_derived_from_reason(self):
         """
-        Given a ResolveOneResult whose fallback_kind is explicitly 'warned',
+        Given a ResolveOneResult whose fallback_outcome is explicitly 'warned',
             but whose reason text names NO recognizable fallback wording at
             all (a reason a substring classifier could never have matched)
         When _unit_from_result adapts it
-        Then fallback_kind is still 'warned' -- proving the value is read
+        Then fallback_outcome is still 'warned' -- proving the value is read
             from the caller's own field, not re-derived from *reason*
         """
         unit = _unit_from_result(
             "rm -rf /tmp/x",
             ResolveOneResult("allow", "some arbitrary reason text", None, "warned"),
         )
-        self.assertEqual(unit.fallback_kind, "warned")
+        self.assertEqual(unit.fallback_outcome, "warned")
 
-    def test_fallback_kind_none_stays_none_even_with_matching_reason_text(self):
+    def test_fallback_outcome_none_stays_none_even_with_matching_reason_text(self):
         """
         Given a ResolveOneResult whose reason text happens to contain the
             OLD marker substring the deleted classifier used to match, but
-            whose fallback_kind field is None
+            whose fallback_outcome field is None
         When _unit_from_result adapts it
-        Then fallback_kind is None -- the reason text is never consulted
+        Then fallback_outcome is None -- the reason text is never consulted
         """
         unit = _unit_from_result(
             "rm -rf /tmp/x",
@@ -467,7 +467,7 @@ class TestUnitFromResult(unittest.TestCase):
                 None,
             ),
         )
-        self.assertIsNone(unit.fallback_kind)
+        self.assertIsNone(unit.fallback_outcome)
 
 
 class TestJudgeUnitInvariants(unittest.TestCase):
@@ -519,7 +519,7 @@ class TestJudgeUnitInvariants(unittest.TestCase):
         self.assertEqual(verdict.decision, "deny")
         self.assertEqual(verdict.reason, "No valid commands found in leaf")
         self.assertIsNone(verdict.matched_rule)
-        self.assertIsNone(verdict.fallback_kind)
+        self.assertIsNone(verdict.fallback_outcome)
 
     def test_unknown_kind_unit_resolves_to_ask(self):
         """

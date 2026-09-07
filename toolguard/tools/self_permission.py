@@ -20,6 +20,7 @@ from typing import Dict, List, Tuple
 
 from toolguard.api import decide
 from toolguard.config import Configuration
+from toolguard.constants import DECISION_ALLOW, DECISION_DENY
 
 
 # ---------------------------------------------------------------------------
@@ -115,20 +116,20 @@ def required_self_permissions() -> Tuple[SelfPermission, ...]:
 def _status_for(permission: SelfPermission, verdict: str) -> SelfPermissionStatus:
     """Classify one self-permission's current verdict into an actionable status."""
     if permission.risk == "read-only":
-        needs_action = verdict != "allow"
+        needs_action = verdict != DECISION_ALLOW
         recommendation = (
             f"Add Bash({permission.pattern}) to the ALLOW list at your chosen scope."
             if needs_action
             else "Already allowed -- no action needed."
         )
     else:  # mutating
-        if verdict == "deny":
+        if verdict == DECISION_DENY:
             needs_action = True
             recommendation = (
                 f"Add Bash({permission.pattern}) to the ASK list at your chosen scope "
                 "(per-invocation consent; do NOT blanket-allow a mutating tool)."
             )
-        elif verdict == "allow":
+        elif verdict == DECISION_ALLOW:
             needs_action = False
             recommendation = (
                 "Currently ALLOWED.  Consider moving it to ASK: a mutating tool that "

@@ -14,6 +14,7 @@ from ``resolve.py``, creating a cycle.
 from typing import List, Optional, Tuple
 
 from toolguard.config_types import LevelMatch, PathAnchoring, ResolveContext
+from toolguard.constants import DECISION_DENY
 from toolguard.normalization import expand_tilde
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
 from toolguard.permissions import is_universal_pattern, resolve_allow_ask
@@ -169,7 +170,7 @@ def decide_file_path_at_level_detailed(
         anchored = _anchor_file_pattern(pattern, config, extended_syntax)
         if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
             return LevelMatch(
-                decision="deny",
+                decision=DECISION_DENY,
                 reason=f"Path matches deny pattern: {pattern}",
                 matched_pattern=pattern,
             )
@@ -249,7 +250,7 @@ def check_file_path_hard_deny(
             return None
 
     return LevelMatch(
-        decision="deny",
+        decision=DECISION_DENY,
         reason=f"Path matches hard_deny pattern: {matched_deny} (cannot be overridden)",
         matched_pattern=matched_deny,
     )

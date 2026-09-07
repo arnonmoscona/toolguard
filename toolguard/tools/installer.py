@@ -47,6 +47,13 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from toolguard import ambient
 from toolguard.claude_code_contract import PRE_TOOL_USE_EVENT, SESSION_START_EVENT
 from toolguard.config import load_config_file
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    FALLBACK_ALLOW_WITH_NO_WARNINGS,
+    FALLBACK_ALLOW_WITH_WARNING,
+)
 from toolguard.config_write_guard import (
     ConfigWriteVerificationError,
     patterns_in_config_text,
@@ -2294,15 +2301,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-match-fallback",
         choices=(
-            "ask",
-            "deny",
-            "allow_with_warning",
-            "allow",
-            "allow_with_no_warnings",
+            DECISION_ASK,
+            DECISION_DENY,
+            FALLBACK_ALLOW_WITH_WARNING,
+            DECISION_ALLOW,
+            FALLBACK_ALLOW_WITH_NO_WARNINGS,
         ),
-        default="ask",
+        default=DECISION_ASK,
         help="what an unmatched command resolves to when the tool has rules but "
-        "none match (default: ask)",
+        f"none match (default: {DECISION_ASK})",
     )
     p.set_defaults(func=cmd_enable_takeover)
 

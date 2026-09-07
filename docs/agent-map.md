@@ -133,8 +133,17 @@ entry over letting it silently go stale.
 - **Q: Can I run Claude Code in an auto-accept/bypass-permissions mode safely with
   toolguard?**
   A: Yes, toolguard's hook still enforces underneath -- but read the honest tradeoff on
-  `no_match_fallback = "allow_with_warning"` first, it's a narrow recommendation for this
-  case only. See [auto-mode.md](auto-mode.md).
+  `no_match_fallback_in_auto_mode = "allow_with_warning"` first, it's a narrow recommendation
+  for this case only (the setting resolves in place of `no_match_fallback` only while
+  `permission_mode` is auto, so it never loosens an interactive session). See
+  [auto-mode.md](auto-mode.md).
+- **Q: How does `no_match_fallback_in_auto_mode`/`undecidable_fallback_in_auto_mode` differ
+  from the base `no_match_fallback`/`undecidable_fallback` settings?**
+  A: Same value vocabulary and resolution, but each `'*_in_auto_mode'` key applies only when
+  Claude Code's own `permission_mode` is its auto mode; unset defers to the base setting's
+  own resolved value rather than to a fixed default. Independently configurable -- setting
+  one does not change the other. See
+  [configuration.md#fallback-settings-in-auto-mode](configuration.md#fallback-settings-in-auto-mode).
 - **Q: What happens to Claude Code's own `Bash(*)`-style blanket allows once Takeover Mode
   is enabled?**
   A: Stripped from native settings as they're loaded, so they can't bypass the real
@@ -264,6 +273,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [additionalContext: injecting guidance alongside a decision](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision)
 - [No-match fallback](configuration.md#no-match-fallback)
 - [Undecidable fallback](configuration.md#undecidable-fallback)
+- [Fallback settings in auto mode](configuration.md#fallback-settings-in-auto-mode)
 - [Assignments looked past when granting](configuration.md#assignments-looked-past-when-granting)
 - [Verifying configuration](configuration.md#verifying-configuration)
 - [Environment variables](configuration.md#environment-variables)

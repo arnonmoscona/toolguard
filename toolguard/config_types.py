@@ -14,6 +14,12 @@ from typing import List, Mapping, Optional, Protocol, Tuple
 
 from toolguard.rule_entry import RuleEntry, _strip_tool_wrapper
 
+#: Claude Code's own auto permission mode -- the one value the two
+#: ``*_fallback_in_auto_mode`` settings (TOO-28) and the Phase 5 trace gate care about.
+#: Lives here (config layer), not in ``hook.py`` (runtime layer): the engine layer
+#: (``permission_resolution.py``, ``resolve.py``) may import config but never runtime.
+AUTO_PERMISSION_MODE = "auto"
+
 
 @dataclass(frozen=True)
 class Provenance:
@@ -247,29 +253,34 @@ class UnrecognizedFallbackSetting:
     """
     A ``*_fallback`` setting written with an unrecognized value.
 
-    Both settings resolve such a value to the safe ``'ask'`` and keep going; without this
-    record that happens with no diagnostic anywhere, so a one-character typo reads as
-    maximum-friction behaviour rather than a typo (see
+    Every such setting resolves such a value to its own safe fallback and keeps going;
+    without this record that happens with no diagnostic anywhere, so a one-character typo
+    reads as unexpected behaviour rather than a typo (see
     :meth:`~toolguard.config.Configuration.unrecognized_fallback_settings`, which produces
     these).
 
     Attributes:
-        key: The setting name -- ``'no_match_fallback'`` or
-            ``'undecidable_fallback'``.
+        key: The setting name -- ``'no_match_fallback'``, ``'undecidable_fallback'``, or
+            one of their ``'*_in_auto_mode'`` counterparts.
         value: The offending value EXACTLY as written in the file, rendered as
             a string (a non-string value, e.g. a bool or a table, is equally
             unusable and equally silent, so it is reported the same way).
         provenance: Origin of the layer that set it, so the warning can name
             the file to edit.
-        accepted: The spellings to advertise in the warning -- the same set for both
-            keys, and deliberately not the internal canonical set (see
+        accepted: The spellings to advertise in the warning -- the same set for every
+            key, and deliberately not the internal canonical set (see
             ``_ACCEPTED_FALLBACK_SPELLINGS``).
+        falls_back_to: What the setting resolves to instead, described in prose --
+            ``"'ask'"`` for the two base settings, ``"the non-auto-mode setting"`` for
+            their ``'*_in_auto_mode'`` counterparts, which have no fixed default of
+            their own.
     """
 
     key: str
     value: str
     provenance: "Provenance"
     accepted: Tuple[str, ...]
+    falls_back_to: str = "'ask'"
 
     def describe(self) -> str:
         """
@@ -278,7 +289,7 @@ class UnrecognizedFallbackSetting:
         """
         return (
             f"{self.key} = {self.value!r} in {self.provenance.describe_brief()} "
-            f"is not a recognized value; falling back to 'ask'. "
+            f"is not a recognized value; falling back to {self.falls_back_to}. "
             f"Accepted values: {', '.join(self.accepted)}"
         )
 
@@ -456,9 +467,9 @@ class UnitVerdict:
             be attributed here.
         decision: ``'allow'``, ``'ask'``, or ``'deny'`` -- the leaf's final decision, after
             any ``undecidable_fallback`` floor has been applied. For an ask-floor leaf this
-            can differ from what the stub itself resolved to; see ``fallback_kind``.
+            can differ from what the stub itself resolved to; see ``fallback_outcome``.
         matched_rule: The winning rule pattern (wrapper-free), or the hard-deny pattern when
-            hard-denied. ``None`` when no rule matched, or when ``fallback_kind`` is not
+            hard-denied. ``None`` when no rule matched, or when ``fallback_outcome`` is not
             ``None``: a rule matching the ask-floor leaf's stub never verified the
             leaf's real, unread content, so it must never be recorded here as the reason the
             decision stands -- the escape hatch decided, not the rule.
@@ -466,20 +477,20 @@ class UnitVerdict:
             hard-deny (pooled across levels, no single provenance), a
             fail-closed default deny, or an escape-hatch outcome (same
             reasoning as ``matched_rule`` above).
-        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or ``None`` -- an OUTCOME
-            flavour of whichever fallback decided this unit (allowed with a warning, allowed
-            silently, or denied). Set once, structurally, at the point of decision; never
-            re-derived by parsing ``reason`` downstream.
+        fallback_outcome: ``'warned'``, ``'silent'``, ``'denied'``, or ``None`` -- WHAT a
+            fallback decided for this unit (allowed with a warning, allowed silently, or
+            denied). Set once, structurally, at the point of decision; never re-derived by
+            parsing ``reason`` downstream.
 
             Does **not** identify WHICH fallback fired: an ordinary no-match allow and the
             undecidable escape hatch can both set the identical value, so this field alone
             cannot tell them apart (confirmed the costly way -- see :attr:`fallback_cause`,
             which exists precisely because this one cannot answer that question).
         fallback_cause: ``'no_match'``, ``'undecidable'``, or ``None`` -- WHY a fallback
-            decided this unit, independent of what it decided (``decision``) or which
-            outcome flavour resulted (``fallback_kind``). Set structurally at the point of
-            decision, in :mod:`toolguard.resolve`/:mod:`toolguard.compound`; never derived
-            downstream. ``None`` when a real rule (or hard-deny) decided instead.
+            decided this unit, independent of what it decided (``decision``) or what it
+            resolved to (``fallback_outcome``). Set structurally at the point of decision,
+            in :mod:`toolguard.resolve`/:mod:`toolguard.compound`; never derived downstream.
+            ``None`` when a real rule (or hard-deny) decided instead.
         reason: Human-readable reason for THIS unit's own decision -- for an ask-floor leaf
             or an undecidable segment, it already names the escape hatch. Distinct from
             :attr:`RuntimeVerdict.reason`, which is the WHOLE compound's combined reason,
@@ -508,7 +519,7 @@ class UnitVerdict:
     provenance: Optional["Provenance"]
     reason: str
     additional_context: Optional[str]
-    fallback_kind: Optional[str] = None
+    fallback_outcome: Optional[str] = None
     fallback_cause: Optional[str] = None
     audit_only: bool = False
 
@@ -601,8 +612,8 @@ class RuntimeVerdict:
             hard-deny (unlike a Bash hard-deny, which does record its
             pattern here -- see :func:`~toolguard.resolve.resolve_file_path_permission_detailed`'s
             own comment for why). Not derived from *reason*.
-        fallback_kind: The deny-side counterpart of :attr:`UnitVerdict.fallback_kind`, at the
-            RUNTIME altitude: ``'denied'`` when this 'deny' came from the
+        fallback_outcome: The deny-side counterpart of :attr:`UnitVerdict.fallback_outcome`,
+            at the RUNTIME altitude: ``'denied'`` when this 'deny' came from the
             ``undecidable_fallback=deny`` escape hatch (Bash-only), else ``None`` -- including
             for a genuine rule/hard-deny match, a fail-closed default, and a plain
             ``no_match_fallback=deny`` (deliberately left untagged, indistinguishable from a
@@ -633,7 +644,7 @@ class RuntimeVerdict:
     additional_context: Optional[str] = None
     fallback_warning: bool = False
     matched_rule: Optional[str] = None
-    fallback_kind: Optional[str] = None
+    fallback_outcome: Optional[str] = None
     fallback_cause: Optional[str] = None
     tool: Optional[str] = None
     target: Optional[str] = None
@@ -659,7 +670,7 @@ class ResolutionConfig(Protocol):
     Closes the gap left by :mod:`toolguard.permission_resolution` being architecturally
     forbidden from importing :mod:`toolguard.config`: any object handed in as ``config`` --
     in practice always a real :class:`~toolguard.config.Configuration`, but a test double
-    needs only this surface -- must structurally supply exactly these five members.
+    needs only this surface -- must structurally supply exactly these six members.
     Restating the whole of ``Configuration`` here would defeat the purpose.
 
     :mod:`toolguard.resolve` needs a wider surface, so none of its ``config`` parameters
@@ -728,6 +739,19 @@ class ResolutionConfig(Protocol):
         """
         ...
 
+    def resolved_no_match_fallback_in_auto_mode(self) -> str:
+        """
+        Return the effective ``no_match_fallback_in_auto_mode`` policy (TOO-28): the
+        no-match handoff to trust when Claude Code's own ``permission_mode`` is
+        ``'auto'``, in place of :meth:`resolved_no_match_fallback`.
+
+        Same value vocabulary. Unset resolves to :meth:`resolved_no_match_fallback`'s own
+        value, not to a fixed default -- so leaving it unset is inert, and the caller
+        decides whether to consult this or the base method by checking the mode itself;
+        this method does not read the mode.
+        """
+        ...
+
     def assignments_looked_past_when_granting(self) -> Tuple[str, ...]:
         """
         Return the assignment variable names an allow rule may be matched past --
@@ -744,10 +768,11 @@ class ResolveConfig(ResolutionConfig, Protocol):
     The configuration surface :mod:`toolguard.resolve` itself needs -- a strict superset of
     :class:`ResolutionConfig`.
 
-    ``resolve.py`` reads four more members than :class:`ResolutionConfig` declares -- two
-    directly (``hard_deny_entries``, ``resolved_undecidable_fallback``), two through the
-    file-path helpers it forwards ``config`` into (``hard_deny``, ``resolve_config_path``).
-    Inheriting rather than restating those four is deliberate: structural subtyping then
+    ``resolve.py`` reads five more members than :class:`ResolutionConfig` declares -- three
+    directly (``hard_deny_entries``, ``resolved_undecidable_fallback``,
+    ``resolved_undecidable_fallback_in_auto_mode``), two through the file-path helpers it
+    forwards ``config`` into (``hard_deny``, ``resolve_config_path``).
+    Inheriting rather than restating those five is deliberate: structural subtyping then
     makes a ``ResolveConfig`` valid wherever a
     ``ResolutionConfig`` is expected, so passing ``config`` down into
     :func:`~toolguard.permission_resolution.resolve_command_permission`/
@@ -802,6 +827,18 @@ class ResolveConfig(ResolutionConfig, Protocol):
         """
         ...
 
+    def resolved_undecidable_fallback_in_auto_mode(self) -> str:
+        """
+        Return the effective ``undecidable_fallback_in_auto_mode`` policy (TOO-28): the
+        undecidable-command handoff to trust when Claude Code's own ``permission_mode``
+        is ``'auto'``, in place of :meth:`resolved_undecidable_fallback`.
+
+        Same value vocabulary. Unset resolves to :meth:`resolved_undecidable_fallback`'s
+        own value, not to a fixed default -- see
+        :meth:`ResolutionConfig.resolved_no_match_fallback_in_auto_mode` for why.
+        """
+        ...
+
 
 class PathAnchoring(Protocol):
     """
@@ -849,10 +886,14 @@ class ResolutionContext(Protocol):
     Attributes:
         tool_name: The governed-tool identity to resolve against.
         extended_syntax: Whether ``[regex]``/``[glob]``/``[native]`` prefixes are honoured.
+        permission_mode: Claude Code's own permission mode for this call (TOO-28), e.g.
+            ``'default'`` or :data:`AUTO_PERMISSION_MODE`, or ``None`` when unknown --
+            selects between a fallback setting and its ``'*_in_auto_mode'`` counterpart.
     """
 
     tool_name: str
     extended_syntax: bool
+    permission_mode: Optional[str]
 
     @property
     def config(self) -> ResolutionConfig:

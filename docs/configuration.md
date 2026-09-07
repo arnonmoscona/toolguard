@@ -31,6 +31,8 @@ question in front of you.
 - [No-match fallback](#no-match-fallback) -- what happens when nothing matches
 - [Undecidable fallback](#undecidable-fallback) -- what happens when a command cannot be
   safely parsed at all
+- [Fallback settings in auto mode](#fallback-settings-in-auto-mode) -- resolving the two
+  settings above differently when Claude Code's own permission mode is auto
 - [Assignments looked past when granting](#assignments-looked-past-when-granting) -- letting
   an allow rule see past a leading `VAR=value`
 - [Verifying configuration](#verifying-configuration)
@@ -656,6 +658,29 @@ is planned; this is a brand-new setting with no prior spelling to preserve. Appl
 **both** takeover and non-takeover modes, resolved more-specific-wins across the
 [configuration hierarchy](#configuration-hierarchy) the same way `no_match_fallback` is.
 
+## Fallback settings in auto mode
+
+`no_match_fallback_in_auto_mode` and `undecidable_fallback_in_auto_mode` let you resolve `no_match_fallback`/`undecidable_fallback` differently when Claude Code's own `permission_mode` is its **auto** mode -- the one where Claude Code stops asking for permission on its own (see [Auto-mode with toolguard](auto-mode.md) for the operational picture; this section is the reference for the two settings themselves).
+
+**These are handoff points, not "auto-mode variants" of the base settings.** Each one is a declaration of how much you trust Claude Code's own auto-mode classifier for one specific class of case toolguard would otherwise ask about -- an unmatched-but-readable command, or one toolguard could not safely read at all. Setting one does not make toolguard "smarter" about auto mode; it names a point where you have decided the other half of the division of labour (see [How this differs from Takeover Mode](auto-mode.md#how-this-differs-from-takeover-mode)) should take over instead.
+
+**They are two independent settings, deliberately not one flag.** You may reasonably trust the classifier with a command toolguard read and simply had no rule for, while still refusing to hand it something toolguard could not read at all -- a single combined flag would force the same answer to both questions.
+
+Set them as **top-level** keys, exactly like their base settings, with the same value vocabulary and alias handling:
+
+```toml
+no_match_fallback_in_auto_mode = "allow"        # same values as no_match_fallback
+undecidable_fallback_in_auto_mode = "allow"     # same values as undecidable_fallback
+```
+
+**Unset means "use the base setting", not a fixed default of its own.** Neither key has an `"ask"` default the way `no_match_fallback`/`undecidable_fallback` do -- leaving one unset (or setting it to an unrecognized value) makes it resolve to whatever its base setting currently resolves to, so adding these keys to a config that does not set them changes nothing. This is also why an unrecognized value here is a smaller concern than an unrecognized base value: it falls back to the base setting's OWN resolved value (itself already a deliberate choice), never silently to `"ask"`.
+
+**Only the ASK tier relaxes.** `deny`, `hard_deny`, and the parse-failure floor (see [Undecidable fallback](#undecidable-fallback) above) resolve exactly the same regardless of `permission_mode` or either of these settings -- there is no way to configure auto mode into skipping a `deny` rule or a `hard_deny` entry.
+
+**Resolution and scope**: more-specific-wins across the [configuration hierarchy](#configuration-hierarchy), applies in both takeover and non-takeover modes, and neither has a `[takeover_mode]` legacy form -- both are brand-new keys with no prior spelling to preserve.
+
+`tools/takeover_audit.py` (surfaced by `toolguard-audit`) reports both of these alongside the base settings' own `loose-no-match-fallback`/`loose-undecidable-fallback` findings, but only when the auto-mode value is both configured and looser than the base one -- an unset auto setting is already covered by the base finding, so it does not duplicate it. Note that this audit has no live `permission_mode` to check against, so it always reports what these settings *would* resolve to, not whether a given call actually ran in auto mode.
+
 ## Assignments looked past when granting
 
 A command can set environment variables before the thing it runs -- `TG_INTENT=1 ls -la`. Matched literally, that leaf starts with `TG_INTENT=1`, not with `ls`, so `allow Bash(ls:*)` does not cover it and the command falls through to `ask`.
@@ -866,6 +891,14 @@ no_match_fallback = "ask"
 # is an identical long-form alias). See "Undecidable fallback" above for the full
 # explanation, including the parse-failure exemption.
 undecidable_fallback = "ask"
+
+# Handoff points for Claude Code's own auto permission mode (TOP-LEVEL keys, no
+# [takeover_mode] alias for either). UNSET means "use the base setting above" -- not a
+# fixed default of its own -- so adding these to a config that never sets them changes
+# nothing. Independent settings: relaxing one does not relax the other. See "Fallback
+# settings in auto mode" above for the full explanation.
+# no_match_fallback_in_auto_mode = "allow"
+# undecidable_fallback_in_auto_mode = "allow"
 
 # Environment-variable names an ALLOW rule may be matched past when they appear as a
 # leading assignment: with "TG_INTENT" listed, allow Bash(ls:*) also covers

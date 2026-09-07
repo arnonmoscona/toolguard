@@ -36,6 +36,7 @@ from typing import Dict, List, Tuple
 
 from toolguard.api import decide
 from toolguard.config import Configuration
+from toolguard.constants import DECISION_ALLOW
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +207,7 @@ def _status_for(
     permission: UninstallReadinessPermission, verdict: str
 ) -> UninstallReadinessStatus:
     """Classify one uninstall-readiness entry's current verdict into an actionable status."""
-    needs_action = verdict != "allow"
+    needs_action = verdict != DECISION_ALLOW
     recommendation = (
         f"Add {permission.tool}({permission.pattern}) to the ALLOW list -- "
         "otherwise this action is not guaranteed to complete during a later "

@@ -9,9 +9,9 @@ file-path (Read/Write/Edit) resolution call :func:`resolve_command_permission`/
 :func:`resolve_file_path_permission` respectively.
 
 It never imports :mod:`toolguard.config` or :mod:`toolguard.resolve` -- only
-:mod:`toolguard.config_types`, :mod:`toolguard.permissions`, :mod:`toolguard.file_matching`,
-and the stdlib, and none of those three import back into this one, so the import graph stays
-a DAG, which ``test.unit.test_architecture`` enforces. That is an import-graph property only:
+:mod:`toolguard.config_types`, :mod:`toolguard.constants`, :mod:`toolguard.permissions`,
+:mod:`toolguard.file_matching`, and the stdlib, and none of the toolguard ones import back into
+this one, so the import graph stays a DAG, which ``test.unit.test_architecture`` enforces. That is an import-graph property only:
 at runtime this module and :mod:`toolguard.file_matching` still call a real ``Configuration``'s
 methods through the Protocol-typed ``config`` parameter below -- a real coupling the import
 graph does not show, and nothing would flag a future ``Configuration`` method calling back into
@@ -44,6 +44,7 @@ more-specific level already decided the outcome.
 from typing import List, Optional, Sequence, Tuple
 
 from toolguard.config_types import (
+    AUTO_PERMISSION_MODE,
     CommandSpellings,
     ConflictOverride,
     FilePathResolutionContext,
@@ -53,6 +54,12 @@ from toolguard.config_types import (
     ToolPatternLayer,
     entry_for_pattern,
     provenance_for_pattern,
+)
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    FALLBACK_ALLOW_WITH_WARNING,
 )
 from toolguard.file_matching import decide_file_path_at_level_detailed
 from toolguard.permissions import decide_command_at_level_detailed
@@ -126,9 +133,9 @@ def apply_parse_failure_floor(
     Passing anything else silently disables this floor for whatever it
     omits, and nothing else in this module re-derives or checks that.
     """
-    if not parse_failures or decision == "deny":
+    if not parse_failures or decision == DECISION_DENY:
         return decision, reason
-    return "ask", _parse_failure_reason(parse_failures)
+    return DECISION_ASK, _parse_failure_reason(parse_failures)
 
 
 def _apply_ask_floor(
@@ -149,7 +156,7 @@ def _apply_ask_floor(
     # Deleting this guard (keeping only the delegate's) silently drops all
     # three from a genuine deny made under a broken config -- caught by
     # test_permission_resolution.TestDenyUnderBrokenConfigKeepsProvenance.
-    if not parse_failures or resolved.decision == "deny":
+    if not parse_failures or resolved.decision == DECISION_DENY:
         return resolved
     decision, reason = apply_parse_failure_floor(
         parse_failures, resolved.decision, resolved.reason
@@ -179,9 +186,11 @@ def _detect_override(
     for result, layers in levels[winning_index + 1 :]:
         # We only care about a DENY at this less-specific level. Matching is
         # deny-first, so a deny here surfaces as decision == 'deny'.
-        if result is not None and result.decision == "deny":
+        if result is not None and result.decision == DECISION_DENY:
             overridden_pattern = result.matched_pattern
-            overridden_prov = provenance_for_pattern(layers, overridden_pattern, "deny")
+            overridden_prov = provenance_for_pattern(
+                layers, overridden_pattern, DECISION_DENY
+            )
             return ConflictOverride(
                 winning_pattern=winning_pattern,
                 winning_provenance=winning_prov,
@@ -246,7 +255,7 @@ def _resolve_unclamped(
         )
 
         override = None
-        if decision == "allow":
+        if decision == DECISION_ALLOW:
             override = _detect_override(levels, index, matched_pattern, prov)
         return RuntimeVerdict(
             decision=decision,
@@ -278,7 +287,7 @@ def _resolve_unclamped(
     #   both by resolved_no_match_fallback() before this branch ever sees them.
     if not has_any_rules:
         return RuntimeVerdict(
-            decision="ask",
+            decision=DECISION_ASK,
             reason=(
                 f"No {tool_name} permission rules configured at any level; "
                 f"defaulting to 'ask'"
@@ -287,41 +296,41 @@ def _resolve_unclamped(
             fallback_cause="no_match",
         )
     fallback = no_match_fallback
-    if fallback == "allow_with_warning":
+    if fallback == FALLBACK_ALLOW_WITH_WARNING:
         return RuntimeVerdict(
-            decision="allow",
+            decision=DECISION_ALLOW,
             reason=(
                 f"{subject} does not match any allow patterns; allowed with a "
-                "warning by no_match_fallback=allow_with_warning (add an "
+                f"warning by no_match_fallback={FALLBACK_ALLOW_WITH_WARNING} (add an "
                 "explicit rule to silence this)"
             ),
             provenance=None,
             fallback_warning=True,
             fallback_cause="no_match",
         )
-    if fallback == "allow":
+    if fallback == DECISION_ALLOW:
         return RuntimeVerdict(
-            decision="allow",
+            decision=DECISION_ALLOW,
             reason=(
                 f"{subject} does not match any allow patterns; allowed with no "
-                "warning by no_match_fallback=allow (add an explicit rule to "
+                f"warning by no_match_fallback={DECISION_ALLOW} (add an explicit rule to "
                 "silence this)"
             ),
             provenance=None,
             fallback_cause="no_match",
         )
-    if fallback == "ask":
+    if fallback == DECISION_ASK:
         return RuntimeVerdict(
-            decision="ask",
+            decision=DECISION_ASK,
             reason=(
                 f"{subject} does not match any allow patterns; awaiting a "
-                "decision (no_match_fallback=ask)"
+                f"decision (no_match_fallback={DECISION_ASK})"
             ),
             provenance=None,
             fallback_cause="no_match",
         )
     return RuntimeVerdict(
-        decision="deny",
+        decision=DECISION_DENY,
         reason=f"{subject} does not match any allow patterns",
         provenance=None,
         fallback_cause="no_match",
@@ -375,6 +384,18 @@ def resolve_permission_cascade(
     return _apply_ask_floor(parse_failures, resolved)
 
 
+def _effective_no_match_fallback(context: ResolutionContext) -> str:
+    """
+    Pick ``context.config``'s no-match fallback (TOO-28): the auto-mode variant when
+    ``context.permission_mode`` is :data:`~toolguard.config_types.AUTO_PERMISSION_MODE`,
+    the base setting otherwise. Shared by :func:`resolve_command_permission` and
+    :func:`resolve_file_path_permission` so the two cannot pick this differently.
+    """
+    if context.permission_mode == AUTO_PERMISSION_MODE:
+        return context.config.resolved_no_match_fallback_in_auto_mode()
+    return context.config.resolved_no_match_fallback()
+
+
 def resolve_command_permission(
     context: ResolutionContext,
     command: str,
@@ -418,7 +439,7 @@ def resolve_command_permission(
         context.tool_name,
         context.config.parse_failures,
         context.config.has_any_rules(context.tool_name),
-        context.config.resolved_no_match_fallback(),
+        _effective_no_match_fallback(context),
     )
 
 
@@ -463,6 +484,6 @@ def resolve_file_path_permission(
         context.tool_name,
         context.config.parse_failures,
         context.config.has_any_rules(context.tool_name),
-        context.config.resolved_no_match_fallback(),
+        _effective_no_match_fallback(context),
         subject="Path",
     )

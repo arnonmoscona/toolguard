@@ -19,6 +19,15 @@ from dataclasses import dataclass, replace
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from toolguard.config_types import RuntimeVerdict, UnitVerdict
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    FALLBACK_ALLOW_WITH_WARNING,
+    FALLBACK_OUTCOME_DENIED,
+    FALLBACK_OUTCOME_SILENT,
+    FALLBACK_OUTCOME_WARNED,
+)
 from toolguard.parser.command_extractor import (
     INLINE_FLAG_TOKEN_RE as _INLINE_FLAG_TOKEN_RE,
 )
@@ -52,7 +61,7 @@ _MAX_CONTEXT_WORDS = 500
 #: ask > allow. Kept separate from ``_combine_strictest``'s own ordering:
 #: that function combines several already-decided sub-commands with its own
 #: reason-building rules, while this floor clamps a single decision.
-_DECISION_STRICTNESS = {"allow": 0, "ask": 1, "deny": 2}
+_DECISION_STRICTNESS = {DECISION_ALLOW: 0, DECISION_ASK: 1, DECISION_DENY: 2}
 
 #: Maps each recognized ``undecidable_fallback`` value to the decision it
 #: floors an undecidable result to. ``'allow_with_warning'`` and ``'allow'``
@@ -65,10 +74,10 @@ _DECISION_STRICTNESS = {"allow": 0, "ask": 1, "deny": 2}
 #: :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`
 #: before compound.py sees it.
 _UNDECIDABLE_FLOOR_DECISION = {
-    "ask": "ask",
-    "deny": "deny",
-    "allow_with_warning": "allow",
-    "allow": "allow",
+    DECISION_ASK: DECISION_ASK,
+    DECISION_DENY: DECISION_DENY,
+    FALLBACK_ALLOW_WITH_WARNING: DECISION_ALLOW,
+    DECISION_ALLOW: DECISION_ALLOW,
 }
 
 
@@ -100,7 +109,7 @@ def _apply_undecidable_floor(decision: str, undecidable_fallback: str) -> str:
     Returns:
         The floored decision -- one of ``'allow'``, ``'ask'``, or ``'deny'``.
     """
-    floor_decision = _UNDECIDABLE_FLOOR_DECISION.get(undecidable_fallback, "ask")
+    floor_decision = _UNDECIDABLE_FLOOR_DECISION.get(undecidable_fallback, DECISION_ASK)
     if _DECISION_STRICTNESS[floor_decision] > _DECISION_STRICTNESS[decision]:
         return floor_decision
     return decision
@@ -186,7 +195,7 @@ class CommandUnit:
             decides the unit. An allowed entry still contributes to the
             unit's other aggregate fields, via :func:`judge_unit`'s
             ``all_parts``: its
-            :attr:`~toolguard.config_types.UnitVerdict.fallback_kind` can
+            :attr:`~toolguard.config_types.UnitVerdict.fallback_outcome` can
             still set the compound's ``fallback_warning``, and its
             :attr:`~toolguard.config_types.UnitVerdict.additional_context`
             is still accumulated into the unit's own. Kept separate from
@@ -309,7 +318,7 @@ class ResolveOneResult:
     :mod:`toolguard.resolve`).
 
     A frozen dataclass rather than a positional tuple: it carries
-    ``fallback_kind`` as data supplied by the caller's own resolution,
+    ``fallback_outcome`` as data supplied by the caller's own resolution,
     rather than a downstream classifier having to guess it back from
     *reason*.
 
@@ -318,20 +327,20 @@ class ResolveOneResult:
         reason: Human-readable reason for this decision.
         additional_context: This result's own ``additionalContext``
             enrichment, or ``None``.
-        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or
-            ``None`` -- see :attr:`~toolguard.config_types.UnitVerdict.fallback_kind`.
+        fallback_outcome: ``'warned'``, ``'silent'``, ``'denied'``, or
+            ``None`` -- see :attr:`~toolguard.config_types.UnitVerdict.fallback_outcome`.
     """
 
     decision: str
     reason: str
     additional_context: Optional[str] = None
-    fallback_kind: Optional[str] = None
+    fallback_outcome: Optional[str] = None
 
 
 def _unit_from_result(sub_command: str, resolved: ResolveOneResult) -> UnitVerdict:
     """Adapt a ``resolve_one``-shaped :class:`ResolveOneResult` into a :class:`UnitVerdict`.
 
-    ``resolve_one`` carries no ``matched_rule``/``provenance``; ``fallback_kind``
+    ``resolve_one`` carries no ``matched_rule``/``provenance``; ``fallback_outcome``
     is read from *resolved* directly, exactly as the caller resolved it.
 
     Args:
@@ -349,7 +358,7 @@ def _unit_from_result(sub_command: str, resolved: ResolveOneResult) -> UnitVerdi
         provenance=None,
         reason=resolved.reason,
         additional_context=resolved.additional_context,
-        fallback_kind=resolved.fallback_kind,
+        fallback_outcome=resolved.fallback_outcome,
     )
 
 
@@ -363,12 +372,12 @@ def _combine_inline_code_reason(
     ``'plain'`` unit with the same sub-commands would produce. This text
     reaches the permission prompt and the audit log, not just a display
     surface -- so the caller must pass *stub_verdict* with its
-    ``fallback_kind`` already set to reflect the escape hatch (see the
+    ``fallback_outcome`` already set to reflect the escape hatch (see the
     ``'inline_code'`` branch above), never the stub's own naturally-computed
     value: a genuine-looking ``matched_rule`` on the truncated stub is not a
     verified match, and combining it here as one would fabricate an
-    attribution. ``fallback_kind`` on the returned unit as a whole is still
-    the caller's own to derive -- this
+    attribution. ``fallback_outcome`` on the returned unit as a whole is
+    still the caller's own to derive -- this
     function's combine only tracks whether one of *these* parts is genuinely
     ``'warned'``, not the escape hatch itself.
 
@@ -382,7 +391,7 @@ def _combine_inline_code_reason(
     if not audit_part_verdicts:
         return None
     combine_over = [stub_verdict, *audit_part_verdicts]
-    if any(v.decision != "allow" for v in combine_over):
+    if any(v.decision != DECISION_ALLOW for v in combine_over):
         return None
     combined = _combine_strictest(combine_over)
     return (combined.reason, combined.additional_context)
@@ -398,7 +407,7 @@ def _judge_undecidable_unit(
     # 'allow' (the least strict) is used as the base, so this always
     # resolves to whatever _UNDECIDABLE_FLOOR_DECISION maps
     # undecidable_fallback to.
-    floored = _apply_undecidable_floor("allow", undecidable_fallback)
+    floored = _apply_undecidable_floor(DECISION_ALLOW, undecidable_fallback)
     logger.debug(
         "Undecidable segment (-> %s): %r reason=%s",
         floored,
@@ -406,33 +415,35 @@ def _judge_undecidable_unit(
         unit.note,
     )
     display = unit.text[:80]
-    fallback_kind = None
-    if floored == "ask":
+    fallback_outcome = None
+    if floored == DECISION_ASK:
         reason = f"Undecidable segment ({unit.note}): {display}"
-    elif floored == "deny":
+    elif floored == DECISION_DENY:
         reason = (
-            f"Undecidable segment denied by undecidable_fallback=deny "
+            f"Undecidable segment denied by undecidable_fallback={DECISION_DENY} "
             f"({unit.note}): {display}"
         )
-    elif undecidable_fallback == "allow_with_warning":
-        # Deliberate no-floor escape hatch, with a warning. fallback_kind
+    elif undecidable_fallback == FALLBACK_ALLOW_WITH_WARNING:
+        # Deliberate no-floor escape hatch, with a warning. fallback_outcome
         # is known structurally here -- no text matching needed.
         reason = (
             "Undecidable segment allowed with a warning by "
-            f"undecidable_fallback=allow_with_warning ({unit.note}): "
+            f"undecidable_fallback={FALLBACK_ALLOW_WITH_WARNING} ({unit.note}): "
             f"{display}"
         )
-        fallback_kind = "warned"
+        fallback_outcome = FALLBACK_OUTCOME_WARNED
     else:
         # undecidable_fallback == "allow": same no-floor escape hatch,
         # but no warning -- say so plainly rather than letting the
         # 'allow_with_warning' wording above cover both.
         reason = (
             "Undecidable segment allowed with no warning by "
-            f"undecidable_fallback=allow ({unit.note}): {display}"
+            f"undecidable_fallback={DECISION_ALLOW} ({unit.note}): {display}"
         )
-        fallback_kind = "silent"
-    unit_fallback_kind = "denied" if floored == "deny" else fallback_kind
+        fallback_outcome = FALLBACK_OUTCOME_SILENT
+    unit_fallback_outcome = (
+        FALLBACK_OUTCOME_DENIED if floored == DECISION_DENY else fallback_outcome
+    )
     return UnitVerdict(
         sub_command=unit.text,
         decision=floored,
@@ -440,7 +451,7 @@ def _judge_undecidable_unit(
         provenance=None,
         reason=reason,
         additional_context=None,
-        fallback_kind=unit_fallback_kind,
+        fallback_outcome=unit_fallback_outcome,
         # A grammar-level undecidable segment has no parts to match against
         # any rule at all (see CommandUnit's own docstring) -- every branch
         # above is floor-decided, unconditionally, regardless of *floored*.
@@ -475,7 +486,7 @@ def _judge_inline_code_unit(
     outer_cmd = unit.parts[0]
     stub = part_verdicts[0]
     # Every part contributing to this unit's decision and, once the
-    # floor allows, its aggregate fields (fallback_kind/warned,
+    # floor allows, its aggregate fields (fallback_outcome/warned,
     # additional_context): the stub itself, audit_parts, and
     # deny_check_parts, checked in that order. Defined once and reused
     # by every consumer below, so a further aggregate field is one more
@@ -494,7 +505,7 @@ def _judge_inline_code_unit(
     # not a bespoke, deny-only scan, which would silently drop an ask
     # reaching no branch at all.
     strictest_kind, strictest_verdict = _pick_strictest(all_parts)
-    deciding = stub if strictest_kind == "allow" else strictest_verdict
+    deciding = stub if strictest_kind == DECISION_ALLOW else strictest_verdict
     decision, reason, additional_context, matched_rule, provenance = (
         deciding.decision,
         deciding.reason,
@@ -502,7 +513,7 @@ def _judge_inline_code_unit(
         deciding.matched_rule,
         deciding.provenance,
     )
-    if decision == "deny":
+    if decision == DECISION_DENY:
         # Either the stub's own deny, or an audit part's -- either way a
         # real rule fired, so matched_rule/provenance are genuine
         # attributions, not an escape hatch. Only the recorded
@@ -510,12 +521,12 @@ def _judge_inline_code_unit(
         # text.
         return UnitVerdict(
             sub_command=unit.text,
-            decision="deny",
+            decision=DECISION_DENY,
             matched_rule=matched_rule,
             provenance=provenance,
             reason=reason,
             additional_context=additional_context,
-            fallback_kind=None,
+            fallback_outcome=None,
             # A real rule (or no-match fallback) on a verifiable
             # sub-command decided this, not the floor -- carry whichever
             # cause *deciding* already carries rather than guessing.
@@ -529,8 +540,8 @@ def _judge_inline_code_unit(
     # dropped.
     display_cmd = _truncate_for_display(outer_cmd)
     floored = _apply_undecidable_floor(decision, undecidable_fallback)
-    if floored == "ask":
-        if decision == "ask":
+    if floored == DECISION_ASK:
+        if decision == DECISION_ASK:
             # The floor made no change -- an explicit ask rule already
             # decided 'ask' before the floor was consulted, whether on
             # the stub itself or on a substitution _pick_strictest
@@ -541,12 +552,12 @@ def _judge_inline_code_unit(
             # correcting.
             return UnitVerdict(
                 sub_command=unit.text,
-                decision="ask",
+                decision=DECISION_ASK,
                 matched_rule=matched_rule,
                 provenance=provenance,
                 reason=reason,
                 additional_context=additional_context,
-                fallback_kind=None,
+                fallback_outcome=None,
                 # Same reasoning as the deny branch above: a real rule
                 # (or no-match fallback) decided, not the floor.
                 fallback_cause=deciding.fallback_cause,
@@ -556,30 +567,30 @@ def _judge_inline_code_unit(
         # matched_rule/provenance must NOT carry the stub's match.
         return UnitVerdict(
             sub_command=unit.text,
-            decision="ask",
+            decision=DECISION_ASK,
             matched_rule=None,
             provenance=None,
             reason=f"ASK floor applied (inline/heredoc foreign code): {display_cmd}",
             additional_context=None,
-            fallback_kind=None,
+            fallback_outcome=None,
             fallback_cause="undecidable",
         )
-    if floored == "deny":
-        # fallback_kind='denied' here is safe: _combine_strictest
-        # discards fallback_kind entirely for any non-allow decision, so
-        # this is a more informative audit tag with no behavioural
+    if floored == DECISION_DENY:
+        # fallback_outcome='denied' here is safe: _combine_strictest
+        # discards fallback_outcome entirely for any non-allow decision,
+        # so this is a more informative audit tag with no behavioural
         # change to the compound's own reason.
         return UnitVerdict(
             sub_command=unit.text,
-            decision="deny",
+            decision=DECISION_DENY,
             matched_rule=None,
             provenance=None,
             reason=(
-                "Denied by undecidable_fallback=deny (inline/heredoc "
+                f"Denied by undecidable_fallback={DECISION_DENY} (inline/heredoc "
                 f"foreign code, unable to safely verify): {display_cmd}"
             ),
             additional_context=None,
-            fallback_kind="denied",
+            fallback_outcome=FALLBACK_OUTCOME_DENIED,
             fallback_cause="undecidable",
         )
     # floored == "allow": undecidable_fallback is either
@@ -588,18 +599,18 @@ def _judge_inline_code_unit(
     # logged. Branch on the actual configured value (not just "floored
     # == allow", which both share) so 'allow' never claims a warning was
     # emitted.
-    if undecidable_fallback == "allow_with_warning":
+    if undecidable_fallback == FALLBACK_ALLOW_WITH_WARNING:
         floor_reason = (
-            "Allowed with a warning by undecidable_fallback=allow_with_warning "
+            f"Allowed with a warning by undecidable_fallback={FALLBACK_ALLOW_WITH_WARNING} "
             f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}"
         )
-        floor_fallback_kind = "warned"
+        floor_fallback_outcome = FALLBACK_OUTCOME_WARNED
     else:
         floor_reason = (
-            "Allowed with no warning by undecidable_fallback=allow "
+            f"Allowed with no warning by undecidable_fallback={DECISION_ALLOW} "
             f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}"
         )
-        floor_fallback_kind = "silent"
+        floor_fallback_outcome = FALLBACK_OUTCOME_SILENT
     # With audit_parts, the breakdown should still show them, the same
     # way a 'plain' unit over the same sub-commands would -- see
     # _combine_inline_code_reason. That folded text only survives to
@@ -609,18 +620,18 @@ def _judge_inline_code_unit(
     # instead. Without audit_parts (the common case), the floor's own
     # wording above is unchanged either way.
     #
-    # The stub is fed in with fallback_kind FORCED to floor_fallback_kind
-    # rather than its own natural value: reaching this branch at all
-    # means the escape hatch decided (decision was already 'allow'
-    # before the floor, or _pick_strictest above found nothing
-    # stricter), so even a genuine-looking matched_rule on the stub is a
-    # coincidental glob match on the TRUNCATED stub text (see
+    # The stub is fed in with fallback_outcome FORCED to
+    # floor_fallback_outcome rather than its own natural value: reaching
+    # this branch at all means the escape hatch decided (decision was
+    # already 'allow' before the floor, or _pick_strictest above found
+    # nothing stricter), so even a genuine-looking matched_rule on the
+    # stub is a coincidental glob match on the TRUNCATED stub text (see
     # _extract_outer_command), never a verified read of the leaf's real
     # content. Trusting that match would bypass _combine_strictest's own
     # fabrication guard for exactly the leaves this branch exists to
     # floor.
     combined = _combine_inline_code_reason(
-        replace(stub, sub_command=unit.text, fallback_kind=floor_fallback_kind),
+        replace(stub, sub_command=unit.text, fallback_outcome=floor_fallback_outcome),
         audit_part_verdicts,
     )
     combined_reason = combined[0] if combined else floor_reason
@@ -628,20 +639,20 @@ def _judge_inline_code_unit(
     # own comment above), not just the stub/audit_parts pair reason
     # folds in.
     combined_context = _accumulate_contexts([v.additional_context for v in all_parts])
-    # fallback_kind: 'warned' whenever the floor itself is, or any part
+    # fallback_outcome: 'warned' whenever the floor itself is, or any part
     # in all_parts was genuinely warned by no_match_fallback.
-    warned = floor_fallback_kind == "warned" or any(
-        v.fallback_kind == "warned" for v in all_parts
+    warned = floor_fallback_outcome == FALLBACK_OUTCOME_WARNED or any(
+        v.fallback_outcome == FALLBACK_OUTCOME_WARNED for v in all_parts
     )
-    fallback_kind = "warned" if warned else floor_fallback_kind
+    fallback_outcome = FALLBACK_OUTCOME_WARNED if warned else floor_fallback_outcome
     return UnitVerdict(
         sub_command=unit.text,
-        decision="allow",
+        decision=DECISION_ALLOW,
         matched_rule=None,
         provenance=None,
         reason=combined_reason,
         additional_context=combined_context,
-        fallback_kind=fallback_kind,
+        fallback_outcome=fallback_outcome,
         fallback_cause="undecidable",
     )
 
@@ -660,12 +671,12 @@ def _judge_plain_unit(
         logger.debug("Empty leaf command after grammar extraction: %r", unit.text)
         return UnitVerdict(
             sub_command=unit.text,
-            decision="deny",
+            decision=DECISION_DENY,
             matched_rule=None,
             provenance=None,
             reason="No valid commands found in leaf",
             additional_context=None,
-            fallback_kind=None,
+            fallback_outcome=None,
         )
 
     # Reformat each part's own reason for the leaf's aggregate wording,
@@ -677,12 +688,12 @@ def _judge_plain_unit(
     # "cmd -> pattern" summary for the all-allowed case.
     inner_units: List[UnitVerdict] = []
     for part_verdict in part_verdicts:
-        if part_verdict.decision == "deny":
+        if part_verdict.decision == DECISION_DENY:
             formatted = (
                 "Compound command contains denied sub-command: "
                 f"{part_verdict.sub_command} ({part_verdict.reason})"
             )
-        elif part_verdict.decision == "ask":
+        elif part_verdict.decision == DECISION_ASK:
             formatted = (
                 "Compound command contains sub-command requiring approval:"
                 f" {part_verdict.sub_command} ({part_verdict.reason})"
@@ -708,7 +719,9 @@ def _judge_plain_unit(
         provenance=None,
         reason=combined.reason,
         additional_context=combined.additional_context,
-        fallback_kind=("warned" if combined.fallback_warning else None),
+        fallback_outcome=(
+            FALLBACK_OUTCOME_WARNED if combined.fallback_warning else None
+        ),
         fallback_cause=combined.fallback_cause,
     )
 
@@ -719,19 +732,19 @@ def _judge_unknown_unit(unit: "CommandUnit") -> UnitVerdict:
     # _unit_for's own comment for why.
     return UnitVerdict(
         sub_command=unit.text,
-        decision="ask",
+        decision=DECISION_ASK,
         matched_rule=None,
         provenance=None,
         reason="Unknown extraction result; cannot verify",
         additional_context=None,
-        fallback_kind=None,
+        fallback_outcome=None,
     )
 
 
 def judge_unit(
     unit: "CommandUnit",
     part_verdicts: List[UnitVerdict],
-    undecidable_fallback: str = "ask",
+    undecidable_fallback: str = DECISION_ASK,
     audit_part_verdicts: Sequence[UnitVerdict] = (),
     deny_check_verdicts: Sequence[UnitVerdict] = (),
 ) -> UnitVerdict:
@@ -1028,12 +1041,12 @@ def _pick_strictest(
         for an all-allow group; each caller handles that case itself.
     """
     for v in verdicts:
-        if v.decision == "deny":
-            return "deny", v
+        if v.decision == DECISION_DENY:
+            return DECISION_DENY, v
     for v in verdicts:
-        if v.decision == "ask":
-            return "ask", v
-    return "allow", None
+        if v.decision == DECISION_ASK:
+            return DECISION_ASK, v
+    return DECISION_ALLOW, None
 
 
 def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
@@ -1058,7 +1071,7 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
     context.
 
     ``fallback_warning`` is ``True`` iff the overall decision is ``'allow'``
-    and at least one contributing leaf's ``fallback_kind`` is ``'warned'``.
+    and at least one contributing leaf's ``fallback_outcome`` is ``'warned'``.
     Computed as a structured ``any()`` over the per-leaf tags, not
     re-derived from the (possibly summarised) final *reason* string -- a
     multi-leaf all-allow compound's summary text does not repeat the
@@ -1076,38 +1089,40 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
         the verdict's own wording, never structured per-sub-command data --
         that lives on ``RuntimeVerdict.sub_matches``, populated
         independently by :mod:`toolguard.resolve`'s own driver loop.
-        ``fallback_kind``/``fallback_cause`` carry the single deciding
+        ``fallback_outcome``/``fallback_cause`` carry the single deciding
         unit's own values through unchanged whenever there is one (deny,
         ask, or exactly one allowed unit); with several allowed units there
         is no single decider, so both stay at their defaults. An empty
         *unit_verdicts* fails closed: ``deny``, "No commands to evaluate".
     """
     kind, deciding = _pick_strictest(unit_verdicts)
-    if kind == "deny":
+    if kind == DECISION_DENY:
         return RuntimeVerdict(
-            decision="deny",
+            decision=DECISION_DENY,
             reason=deciding.reason,
             additional_context=deciding.additional_context,
-            fallback_kind=deciding.fallback_kind,
+            fallback_outcome=deciding.fallback_outcome,
             fallback_cause=deciding.fallback_cause,
         )
-    if kind == "ask":
+    if kind == DECISION_ASK:
         return RuntimeVerdict(
-            decision="ask",
+            decision=DECISION_ASK,
             reason=deciding.reason,
             additional_context=deciding.additional_context,
             fallback_cause=deciding.fallback_cause,
         )
-    allowed = [uv for uv in unit_verdicts if uv.decision == "allow"]
+    allowed = [uv for uv in unit_verdicts if uv.decision == DECISION_ALLOW]
     if allowed:
         accumulated_context = _accumulate_contexts(
             [uv.additional_context for uv in allowed]
         )
-        fallback_warning = any(uv.fallback_kind == "warned" for uv in allowed)
+        fallback_warning = any(
+            uv.fallback_outcome == FALLBACK_OUTCOME_WARNED for uv in allowed
+        )
         if len(allowed) == 1:
             deciding = allowed[0]
             return RuntimeVerdict(
-                decision="allow",
+                decision=DECISION_ALLOW,
                 reason=deciding.reason,
                 additional_context=accumulated_context,
                 fallback_warning=fallback_warning,
@@ -1116,7 +1131,7 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
         # Multiple allowed units: build "cmd -> pattern" summary.
         match_details = []
         for uv in allowed:
-            if uv.fallback_kind is not None:
+            if uv.fallback_outcome is not None:
                 # Fabrication guard: an escape-hatch allow is not a matched
                 # rule, so its reason's own trailing "...): <outer_cmd>"
                 # text must NOT be parsed as a "cmd -> pattern" match below
@@ -1149,12 +1164,12 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
             else:
                 match_details.append(r)
         return RuntimeVerdict(
-            decision="allow",
+            decision=DECISION_ALLOW,
             reason=f"All {len(allowed)} sub-commands allowed: [{', '.join(match_details)}]",
             additional_context=accumulated_context,
             fallback_warning=fallback_warning,
         )
-    return RuntimeVerdict(decision="deny", reason="No commands to evaluate")
+    return RuntimeVerdict(decision=DECISION_DENY, reason="No commands to evaluate")
 
 
 def check_compound_permission(
@@ -1163,7 +1178,7 @@ def check_compound_permission(
     deny_patterns: List[str],
     ask_patterns: List[str] = None,
     extended_syntax: bool = True,
-    undecidable_fallback: str = "ask",
+    undecidable_fallback: str = DECISION_ASK,
 ) -> RuntimeVerdict:
     """Check permissions for a compound bash command.
 
@@ -1178,7 +1193,7 @@ def check_compound_permission(
     Delegates to :func:`resolve_compound_permission` with a closure over
     :func:`toolguard.permissions.check_permission`, which returns a plain
     ``(decision, reason)`` 2-tuple -- wrapped as a :class:`ResolveOneResult`
-    with ``additional_context``/``fallback_kind`` at their defaults (``check_permission``
+    with ``additional_context``/``fallback_outcome`` at their defaults (``check_permission``
     never produces a fallback outcome of its own).
 
     Args:
@@ -1211,7 +1226,7 @@ def check_compound_permission(
 def resolve_compound_permission_detailed(
     command: str,
     resolve_one: Callable[[str], ResolveOneResult],
-    undecidable_fallback: str = "ask",
+    undecidable_fallback: str = DECISION_ASK,
 ) -> RuntimeVerdict:
     """Resolve a compound command where each sub-command cascades independently.
 
@@ -1245,7 +1260,7 @@ def resolve_compound_permission_detailed(
 
     if not units:
         return RuntimeVerdict(
-            decision="deny", reason="No valid commands found in command line"
+            decision=DECISION_DENY, reason="No valid commands found in command line"
         )
 
     unit_verdicts = [
@@ -1262,7 +1277,7 @@ def resolve_compound_permission_detailed(
 def resolve_compound_permission(
     command: str,
     resolve_one: Callable[[str], ResolveOneResult],
-    undecidable_fallback: str = "ask",
+    undecidable_fallback: str = DECISION_ASK,
 ) -> RuntimeVerdict:
     """Resolve a compound command.
 

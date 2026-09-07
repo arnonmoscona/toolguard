@@ -8,7 +8,10 @@ leaf module that imports only other foundation modules, so any layer can use
 these without coupling to something heavier.
 
 The ``STATUS_*`` values are the common ones for a harvested corpus entry
-(``LogEntry.status``); a status outside this set is preserved as-is.
+(``LogEntry.status``); a status outside this set is preserved as-is. ``DECISION_*``,
+``FALLBACK_*``, and ``FALLBACK_OUTCOME_*`` are a separate vocabulary -- permission
+decisions, not corpus statuses -- deliberately not folded into ``STATUS_*`` even though
+one spelling (``'ask'``) is shared by coincidence, not by meaning.
 """
 
 from toolguard.claude_code_contract import COMMAND_PAYLOAD_KEY as _COMMAND_PAYLOAD_KEY
@@ -34,6 +37,27 @@ STATUS_ASK = "ASK"
 STATUS_ERROR = "ERROR"
 #: No matching tool_result was found.
 STATUS_UNKNOWN = "UNKNOWN"
+
+#: A permission decision -- ``RuntimeVerdict.decision``/``UnitVerdict.decision`` and
+#: everything that dispatches on one. Also the value a ``no_match_fallback``/
+#: ``undecidable_fallback`` setting resolves to when it names one of these three
+#: directly, rather than ``FALLBACK_ALLOW_WITH_WARNING``/its alias below.
+DECISION_ALLOW = "allow"
+DECISION_DENY = "deny"
+DECISION_ASK = "ask"
+
+#: The two ``no_match_fallback``/``undecidable_fallback`` values with no decision-value
+#: equivalent -- allow, but only after logging a warning (or, for the alias, allow with
+#: none at all). See :data:`DECISION_ALLOW` for the plain ``'allow'`` spelling.
+FALLBACK_ALLOW_WITH_WARNING = "allow_with_warning"
+FALLBACK_ALLOW_WITH_NO_WARNINGS = "allow_with_no_warnings"
+
+#: ``UnitVerdict.fallback_outcome``/``RuntimeVerdict.fallback_outcome`` -- which escape
+#: hatch, if any, decided an allow (or a denied undecidable segment): warned, silent, or
+#: (the undecidable floor only) denied without ever evaluating a rule.
+FALLBACK_OUTCOME_WARNED = "warned"
+FALLBACK_OUTCOME_SILENT = "silent"
+FALLBACK_OUTCOME_DENIED = "denied"
 
 #: Timeout, in seconds, for git subprocesses run through
 #: :func:`toolguard._git.run_git` -- guards against a hang or an

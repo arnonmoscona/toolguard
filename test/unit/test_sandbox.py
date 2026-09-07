@@ -771,7 +771,7 @@ class TestSandboxEvaluation(unittest.TestCase):
             self.assertEqual(unit.sub_command, "python -c 'x=1'")
             self.assertEqual(unit.decision, "ask")
             self.assertIsNone(unit.matched_rule)
-            self.assertIsNone(unit.fallback_kind)
+            self.assertIsNone(unit.fallback_outcome)
 
     def test_rules_file_in_toolguard_rules_dir_is_discovered(self):
         """

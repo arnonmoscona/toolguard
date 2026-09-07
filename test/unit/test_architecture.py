@@ -71,6 +71,7 @@ LAYERS = (
         frozenset(
             {
                 "toolguard.config_types",
+                "toolguard.constants",
                 "toolguard.normalization",
                 "toolguard.patterns",
             }
@@ -81,6 +82,7 @@ LAYERS = (
         frozenset(
             {
                 "toolguard.config_types",
+                "toolguard.constants",
                 "toolguard.normalization",
                 "toolguard.patterns",
                 "toolguard.permissions",
@@ -92,6 +94,7 @@ LAYERS = (
         frozenset(
             {
                 "toolguard.config_types",
+                "toolguard.constants",
                 "toolguard.permissions",
                 "toolguard.file_matching",
             }
