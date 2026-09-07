@@ -720,6 +720,155 @@ class TestPerRuleAutoModeBehavior(unittest.TestCase):
         self.assertEqual(result.decision, "allow")
         self.assertEqual(len(result.overrides), 1)
 
+    def test_override_provenance_names_the_overridden_rules_real_list_when_it_too_migrated(
+        self,
+    ):
+        """
+        Given a more-specific ask rule declaring auto_mode_behavior='allow' (the
+            winner), and a LESS-specific ALLOW rule declaring
+            auto_mode_behavior='deny' for the same command -- the overridden
+            rule ALSO migrated groups, so its provenance lookup hits the same
+            ordering trap the winning rule's does
+        When the command is resolved under permission_mode='auto'
+        Then the decision is 'allow' with one override recorded, and the
+            override's overridden_provenance is not None -- the lookup found
+            the overridden rule in its real (allow) list, not the (deny) list
+            its effective decision would suggest
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                ask=[{"match": "Bash(git push:*)", "auto_mode_behavior": "allow"}],
+                specificity=0,
+            ),
+            _layer(
+                "user",
+                _USER_PATH,
+                allow=[{"match": "Bash(git push:*)", "auto_mode_behavior": "deny"}],
+                specificity=9,
+            ),
+        )
+
+        result = self._resolve(config, "git push origin main", "auto")
+
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(len(result.overrides), 1)
+        _, override = result.overrides[0]
+        self.assertIsNotNone(override.overridden_provenance)
+        self.assertEqual(override.overridden_provenance.path, _USER_PATH)
+
+    def test_allow_migrated_to_deny_wins_deny_first_precedence_over_a_matching_ask(
+        self,
+    ):
+        """
+        Given, in the SAME level, an allow rule declaring auto_mode_behavior='deny'
+            and an unrelated ask rule that ALSO matches the same command
+        When resolved under permission_mode='auto'
+        Then the decision is 'deny' -- the migrated rule competes on its
+            EFFECTIVE group's precedence (deny-first beats ask), not the
+            precedence of the list it is written in (Arnon, 2026-09-07: "a
+            rule's group determines its precedence")
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[
+                    {"match": "Bash(mycmd *)", "auto_mode_behavior": "deny"},
+                ],
+                ask=["Bash(mycmd --dangerous*)"],
+            )
+        )
+
+        result = self._resolve(config, "mycmd --dangerous now", "auto")
+
+        self.assertEqual(result.decision, "deny")
+
+    def test_provenance_and_additional_context_survive_narrowing_to_deny(self):
+        """
+        Given an ALLOW rule carrying additionalContext and
+            auto_mode_behavior='deny', under permission_mode='auto' -- the
+            mirror of the deny-widened-to-allow case, this time narrowing
+        When the matching command is resolved
+        Then the decision is 'deny', but matched_rule, provenance, and
+            additional_context still attribute to the ALLOW rule that
+            actually matched, not to any deny-list entry
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[
+                    {
+                        "match": "Bash(mycmd *)",
+                        "additionalContext": "auto-denied by classifier",
+                        "auto_mode_behavior": "deny",
+                    }
+                ],
+            )
+        )
+
+        result = self._resolve(config, "mycmd --dangerous now", "auto")
+
+        self.assertEqual(result.decision, "deny")
+        self.assertEqual(result.matched_rule, "mycmd *")
+        self.assertIsNotNone(result.provenance)
+        self.assertEqual(result.provenance.path, _PROJECT_PATH)
+        self.assertEqual(result.additional_context, "auto-denied by classifier")
+
+    def test_reason_names_the_rules_real_list_not_its_effective_one(self):
+        """
+        Given a DENY rule declaring auto_mode_behavior='allow', under
+            permission_mode='auto'
+        When the matching command is resolved
+        Then the reason's base clause says "matches deny pattern" -- the
+            rule's REAL list, so a reader grepping the deny list finds it --
+            and the suffix separately states the effective decision
+            (Arnon, 2026-09-07: "the provenance of the rule is still in the
+            actual group it resides in"; the sentence must say so too, not
+            just the Provenance object)
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                deny=[{"match": "Bash(rm -rf *)", "auto_mode_behavior": "allow"}],
+            )
+        )
+
+        result = self._resolve(config, "rm -rf /tmp/x", "auto")
+
+        self.assertEqual(result.decision, "allow")
+        self.assertIn("matches deny pattern: rm -rf *", result.reason)
+        self.assertNotIn("matches allow pattern", result.reason)
+        self.assertIn("auto_mode_behavior='allow'", result.reason)
+        self.assertIn("applied", result.reason)
+
+    def test_reason_names_the_real_list_in_the_narrowing_direction_too(self):
+        """
+        Given an ALLOW rule declaring auto_mode_behavior='deny', under
+            permission_mode='auto' -- the mirror direction
+        When the matching command is resolved
+        Then the reason's base clause says "matches allow pattern", the
+            rule's real list, not "matches deny pattern"
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[{"match": "Bash(mycmd *)", "auto_mode_behavior": "deny"}],
+            )
+        )
+
+        result = self._resolve(config, "mycmd --dangerous now", "auto")
+
+        self.assertEqual(result.decision, "deny")
+        self.assertIn("matches allow pattern: mycmd *", result.reason)
+        self.assertNotIn("matches deny pattern", result.reason)
+        self.assertIn("auto_mode_behavior='deny'", result.reason)
+        self.assertIn("applied", result.reason)
+
 
 class TestHardDenyRegressionGuards(unittest.TestCase):
     """
@@ -838,6 +987,348 @@ class TestAutoModeBehaviorUnderParseFailure(unittest.TestCase):
         result = resolve_command_permission(invocation, "git push origin main")
 
         self.assertEqual(result.decision, "ask")
+
+
+class TestProgramSourceGuard(unittest.TestCase):
+    """
+    A matched rule's ``program_source`` (TOO-28 spec 4.3) constrains it to one
+    visibility of executable material. A mismatch makes the WHOLE LEVEL
+    unmatched -- the cascade falls through to the next, less-specific level,
+    same as the existing no-match branch (``if result is None: continue``) --
+    rather than retrying other patterns within the same level's own list.
+    """
+
+    def _resolve(self, config, command, program_source):
+        """Resolve *command* with the given classification, permission_mode unset."""
+        invocation = Invocation(
+            tool_name="Bash", tool_input={}, config=config, extended_syntax=True
+        )
+        return resolve_command_permission(
+            invocation, command, program_source=program_source
+        )
+
+    def test_file_required_rule_matches_a_file_command(self):
+        """
+        Given an allow rule requiring program_source='file'
+        When resolved with a command classified as 'file'
+        Then the rule matches and the decision is 'allow'
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[{"match": "Bash(uv run python *)", "program_source": "file"}],
+            )
+        )
+        result = self._resolve(config, "uv run python script.py", "file")
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.matched_rule, "uv run python *")
+
+    def test_file_required_rule_does_not_fire_on_inline_code(self):
+        """
+        Given an allow rule requiring program_source='file', AND a less-specific
+            level with an unconditional ask rule for the same command
+        When resolved with a command classified as 'not_file' (inline)
+        Then the more-specific level's guard fails, the level is treated as
+            unmatched, and the cascade falls through to the ask rule below --
+            proving the guard fires on the file case, not on every case
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[{"match": "Bash(uv run python *)", "program_source": "file"}],
+                specificity=0,
+            ),
+            _layer("user", _USER_PATH, ask=["Bash(uv run python *)"], specificity=9),
+        )
+        result = self._resolve(config, 'uv run python -c "print(1)"', "not_file")
+        self.assertEqual(result.decision, "ask")
+        self.assertEqual(result.matched_rule, "uv run python *")
+        self.assertEqual(result.provenance.path, _USER_PATH)
+
+    def test_not_file_required_rule_does_not_fire_on_a_file(self):
+        """
+        Given an allow rule requiring program_source='not_file', AND a
+            less-specific level with an unconditional ask rule for the same
+            command
+        When resolved with a command classified as 'file'
+        Then the more-specific level's guard fails and the cascade falls
+            through -- the negative direction the mirror of the previous test
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[
+                    {"match": "Bash(uv run python *)", "program_source": "not_file"}
+                ],
+                specificity=0,
+            ),
+            _layer("user", _USER_PATH, ask=["Bash(uv run python *)"], specificity=9),
+        )
+        result = self._resolve(config, "uv run python script.py", "file")
+        self.assertEqual(result.decision, "ask")
+        self.assertEqual(result.provenance.path, _USER_PATH)
+
+    def test_rule_without_program_source_is_unaffected(self):
+        """
+        Given an allow rule with no program_source at all
+        When resolved once with 'file' and once with 'not_file'
+        Then both resolve to 'allow' -- an absent guard behaves exactly as
+            today, under every command shape
+        """
+        config = _config(
+            _layer("project", _PROJECT_PATH, allow=["Bash(uv run python *)"])
+        )
+        for classification in ("file", "not_file"):
+            with self.subTest(classification=classification):
+                result = self._resolve(
+                    config, "uv run python script.py", classification
+                )
+                self.assertEqual(result.decision, "allow")
+
+    def test_program_source_composes_with_a_default_pattern(self):
+        """
+        Given a DEFAULT (bare cmd:*) pattern carrying program_source='file'
+        When resolved with a matching 'file' command
+        Then the rule matches
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[{"match": "Bash(uv run python:*)", "program_source": "file"}],
+            )
+        )
+        result = self._resolve(config, "uv run python script.py", "file")
+        self.assertEqual(result.decision, "allow")
+
+    def test_program_source_composes_with_a_regex_pattern(self):
+        """
+        Given a [regex]-prefixed pattern carrying program_source='file'
+        When resolved with a matching 'file' command
+        Then the rule matches
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[
+                    {
+                        "match": "Bash([regex]^uv run python\\b)",
+                        "program_source": "file",
+                    }
+                ],
+            )
+        )
+        result = self._resolve(config, "uv run python script.py", "file")
+        self.assertEqual(result.decision, "allow")
+
+    def test_program_source_composes_with_a_glob_pattern(self):
+        """
+        Given a [glob]-prefixed pattern carrying program_source='file'
+        When resolved with a matching 'file' command
+        Then the rule matches
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[
+                    {
+                        "match": "Bash([glob]uv run python *)",
+                        "program_source": "file",
+                    }
+                ],
+            )
+        )
+        result = self._resolve(config, "uv run python script.py", "file")
+        self.assertEqual(result.decision, "allow")
+
+    def test_program_source_composes_with_a_native_pattern(self):
+        """
+        Given a [native]-prefixed pattern carrying program_source='file'
+        When resolved with a matching 'file' command
+        Then the rule matches
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[
+                    {
+                        "match": "Bash([native]uv run python*)",
+                        "program_source": "file",
+                    }
+                ],
+            )
+        )
+        result = self._resolve(config, "uv run python script.py", "file")
+        self.assertEqual(result.decision, "allow")
+
+    def test_program_source_and_auto_mode_behavior_act_independently(self):
+        """
+        Given an ask rule carrying BOTH program_source='file' and
+            auto_mode_behavior='allow'
+        When resolved under permission_mode='auto' with a 'file' command, and
+            again with a 'not_file' command
+        Then the 'file' command widens to 'allow' (auto_mode_behavior fired),
+            while the 'not_file' command's guard fails, so the rule does not
+            apply and no auto_mode_behavior is ever consulted -- proving the
+            two keys are independent rather than assumed to be
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                ask=[
+                    {
+                        "match": "Bash(uv run python *)",
+                        "program_source": "file",
+                        "auto_mode_behavior": "allow",
+                    }
+                ],
+            )
+        )
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode="auto",
+        )
+
+        file_result = resolve_command_permission(
+            invocation, "uv run python script.py", program_source="file"
+        )
+        not_file_result = resolve_command_permission(
+            invocation, 'uv run python -c "print(1)"', program_source="not_file"
+        )
+
+        self.assertEqual(file_result.decision, "allow")
+        self.assertEqual(not_file_result.decision, "ask")
+
+
+class TestProgramSourceGuardNeverAppliesToFilePathResolution(unittest.TestCase):
+    """
+    ``program_source`` classifies Bash/MCP-terminal commands only (TOO-28 spec 4.3);
+    ``resolve_file_path_permission`` never computes a classification. A rule that
+    carries the key on a Read/Write/Edit pattern must be INERT, not a silent change
+    in what the rule matches -- an inert allow is a nuisance; a fail-open deny is a
+    security defect (Arnon, 2026-09-07 review).
+    """
+
+    def test_allow_rule_with_program_source_still_matches_a_file_path(self):
+        """
+        Given a Read allow rule carrying program_source='file'
+        When resolve_file_path_permission resolves a matching path
+        Then the decision is 'allow' -- the guard never activates for a
+            resolution that never classified anything
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[{"match": "Read(/tmp/x/**)", "program_source": "file"}],
+            )
+        )
+        result = resolve_file_path_permission(
+            Invocation.for_evaluation(config, tool_name="Read"), "/tmp/x/f.txt"
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.matched_rule, "/tmp/x/**")
+
+    def test_deny_rule_with_program_source_still_denies_a_file_path(self):
+        """
+        Given a Read deny rule carrying program_source='file'
+        When resolve_file_path_permission resolves a matching path
+        Then the decision is 'deny' -- the same guard that must not silently
+            widen an allow must not silently narrow a deny to nothing either
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                deny=[{"match": "Read(/tmp/x/secret*)", "program_source": "file"}],
+            )
+        )
+        result = resolve_file_path_permission(
+            Invocation.for_evaluation(config, tool_name="Read"),
+            "/tmp/x/secret.txt",
+        )
+        self.assertEqual(result.decision, "deny")
+        self.assertEqual(result.matched_rule, "/tmp/x/secret*")
+
+
+class TestProgramSourceGuardIsOrderIndependent(unittest.TestCase):
+    """
+    A rule whose ``program_source`` guard fails did not match AT ALL (Arnon,
+    2026-09-07: "a rule match should be considered on the whole rule, not just the
+    pattern match... the ordering doesn't matter whatsoever as the guarded form...
+    simply would not be considered a match in the first place, masking nothing").
+    It is filtered out BEFORE ``match_command`` ever sees it (see
+    ``_level_pattern_buckets``), so an unguarded sibling in the same list that also
+    matches is unaffected by where the guarded pattern sits in the list.
+    """
+
+    def test_the_broader_deny_fires_regardless_of_which_pattern_is_listed_first(self):
+        """
+        Given a deny list with a guarded pattern that does NOT apply to this
+            command (program_source='not_file', but the command is a file) and
+            an unguarded sibling pattern that also matches the same command
+        When the command is resolved, once with the guarded pattern listed
+            first and once with the order reversed
+        Then both orderings deny -- the exact case that exposed the original
+            bug (Arnon, 2026-09-07)
+        """
+        guarded = {"match": "Bash(python *)", "program_source": "not_file"}
+        broader = "Bash(python /tmp/danger.py)"
+        command = "python /tmp/danger.py"
+
+        for deny_list in ([guarded, broader], [broader, guarded]):
+            with self.subTest(order=[type(e).__name__ for e in deny_list]):
+                config = _config(_layer("project", _PROJECT_PATH, deny=deny_list))
+                invocation = Invocation(
+                    tool_name="Bash",
+                    tool_input={},
+                    config=config,
+                    extended_syntax=True,
+                )
+
+                result = resolve_command_permission(
+                    invocation, command, program_source="file"
+                )
+
+                self.assertEqual(result.decision, "deny")
+
+    def test_the_guarded_pattern_still_wins_when_its_own_condition_is_met(self):
+        """
+        Given the same deny list, but a command classification that DOES
+            satisfy the guarded pattern's own condition
+        When resolved
+        Then it still denies -- the guarded rule is a normal deny once its
+            guard passes, not disabled by having a guard at all
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                deny=[
+                    {"match": "Bash(python *)", "program_source": "not_file"},
+                    "Bash(python /tmp/danger.py)",
+                ],
+            )
+        )
+        invocation = Invocation(
+            tool_name="Bash", tool_input={}, config=config, extended_syntax=True
+        )
+
+        result = resolve_command_permission(
+            invocation, 'python -c "x"', program_source="not_file"
+        )
+
+        self.assertEqual(result.decision, "deny")
 
 
 if __name__ == "__main__":

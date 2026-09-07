@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from toolguard.claude_code_contract import STRIPPED_WRAPPERS
 from toolguard.config_types import CommandSpellings
+from toolguard.constants import PROGRAM_SOURCE_FILE, PROGRAM_SOURCE_NOT_FILE
 from toolguard.parser import bash_parser
 from toolguard.parser.command_model import (
     IRAssignmentPrefix,
@@ -234,6 +235,15 @@ _AWK_FLAGS = _ExecutorFlags(
     program_file_letters=frozenset("f"),
     bare_program=True,
 )
+#: ``bash``/``sh``/``dash``/``ksh``/``zsh``'s only inline-code short flag. Deliberately
+#: its own spec, not :data:`_DEFAULT_EXECUTOR_FLAGS`'s broader ``"cer"`` guess: a
+#: bash-family shell's ``-e``/``-r`` are real, common flags (exit-on-error, restricted
+#: shell) that take no value and name no program -- misreading either as inline would
+#: make :func:`classify_program_source` call ``bash -e script.sh`` not-a-file. Never reached
+#: by :func:`_detect_foreign_inline_code`'s own inline-code detection, which finds an
+#: executor via :data:`FOREIGN_EXECUTORS` only -- bash-family names are never in it, since
+#: that payload is decomposed by this pipeline, not floored.
+_BASH_FAMILY_FLAGS = _ExecutorFlags(inline_letters=frozenset("c"))
 
 #: Fallback for a foreign executor with no entry of its own -- ``csh``,
 #: ``tcsh``, ``fish`` and anything added to :data:`FOREIGN_EXECUTORS` without a
@@ -242,7 +252,11 @@ _DEFAULT_EXECUTOR_FLAGS = _ExecutorFlags(inline_letters=frozenset("cer"))
 
 #: Per-executor flag specs, keyed by basename. Looked up by exact basename
 #: first, then by the interpreter family :func:`_is_foreign_executor`
-#: prefix-matches, so ``python3.13`` and ``pypy3`` reach the python spec.
+#: prefix-matches, so ``python3.13`` and ``pypy3`` reach the python spec. Also serves
+#: :func:`classify_program_source` (TOO-28 spec 4.3), which additionally looks up a
+#: :data:`BASH_FAMILY` name here -- entries never reached by :func:`_flags_for`'s other
+#: caller, :func:`_detect_foreign_inline_code`, since bash-family is never a "foreign
+#: executor" (see :data:`_BASH_FAMILY_FLAGS`).
 _EXECUTOR_FLAGS = {
     "python": _PYTHON_FLAGS,
     "pypy": _PYTHON_FLAGS,
@@ -254,6 +268,11 @@ _EXECUTOR_FLAGS = {
     "Rscript": _RSCRIPT_FLAGS,
     "awk": _AWK_FLAGS,
     "gawk": _AWK_FLAGS,
+    "bash": _BASH_FAMILY_FLAGS,
+    "sh": _BASH_FAMILY_FLAGS,
+    "dash": _BASH_FAMILY_FLAGS,
+    "ksh": _BASH_FAMILY_FLAGS,
+    "zsh": _BASH_FAMILY_FLAGS,
 }
 
 #: Commands that run another command given as their arguments, so a foreign
@@ -640,7 +659,9 @@ def _flags_for(name: str) -> _ExecutorFlags:
     return _DEFAULT_EXECUTOR_FLAGS
 
 
-def _executor_index(tokens: List[str]) -> Optional[int]:
+def _executor_index(
+    tokens: List[str], *, include_bash_family: bool = False
+) -> Optional[int]:
     """Return the index of the foreign executor *tokens* actually runs, or None.
 
     Only the command word counts, plus a command word reached through
@@ -649,11 +670,18 @@ def _executor_index(tokens: List[str]) -> Optional[int]:
     ``grep python -c file``, where the interpreter is merely an argument, is
     not. Everything after a wrapper is searched, since a wrapper's own
     arguments cannot be told from the command it wraps.
+
+    Args:
+        tokens: The command's tokens.
+        include_bash_family: Also match a :data:`BASH_FAMILY` name, for
+            :func:`classify_program_source`. :func:`_detect_foreign_inline_code`
+            leaves this False -- bash-family payload is decomposed by this
+            pipeline, not floored as inline.
     """
     after_wrapper = False
     for idx, tok in enumerate(tokens):
         bn = _basename(tok)
-        if _is_foreign_executor(bn):
+        if _is_foreign_executor(bn) or (include_bash_family and _is_bash_family(bn)):
             return idx
         if after_wrapper:
             continue
@@ -663,6 +691,29 @@ def _executor_index(tokens: List[str]) -> Optional[int]:
         if not _ASSIGNMENT_TOKEN_RE.match(tok):
             return None
     return None
+
+
+def _classify_flag_token(tok: str, spec: _ExecutorFlags) -> Tuple[Optional[str], bool]:
+    """Classify one bundled short-flag token (e.g. ``-Xc``) against *spec*.
+
+    Returns:
+        ``(kind, consumed_next)``: *kind* is ``"inline"``, ``"program_file"``,
+        or None if the bundle carries neither; *consumed_next* is True when
+        the bundle's value is the next token, so the caller must skip it too.
+    """
+    for pos, letter in enumerate(tok[1:], start=1):
+        if letter in spec.inline_letters:
+            return "inline", False
+        takes_value = letter in spec.value_letters
+        is_program_file = letter in spec.program_file_letters
+        if is_program_file:
+            takes_value = True
+        if takes_value:
+            # The value ends the bundle: it is the rest of this token, or
+            # the whole of the next one.
+            consumed_next = pos + 1 == len(tok)
+            return ("program_file" if is_program_file else None), consumed_next
+    return None, False
 
 
 def _scan_for_inline_code(remaining: List[str], spec: _ExecutorFlags) -> bool:
@@ -692,21 +743,66 @@ def _scan_for_inline_code(remaining: List[str], spec: _ExecutorFlags) -> bool:
                 return True
             idx += 1
             continue
-        consumed_next = False
-        for pos, letter in enumerate(tok[1:], start=1):
-            if letter in spec.inline_letters:
-                return True
-            takes_value = letter in spec.value_letters
-            if letter in spec.program_file_letters:
-                program_from_file = True
-                takes_value = True
-            if takes_value:
-                # The value ends the bundle: it is the rest of this token, or
-                # the whole of the next one.
-                consumed_next = pos + 1 == len(tok)
-                break
+        kind, consumed_next = _classify_flag_token(tok, spec)
+        if kind == "inline":
+            return True
+        if kind == "program_file":
+            program_from_file = True
         idx += 2 if consumed_next else 1
     return False
+
+
+def _program_source_for_executor(remaining: List[str], spec: _ExecutorFlags) -> str:
+    """Classify whether the executable material after *spec*'s executor is a file.
+
+    Mirrors :func:`_scan_for_inline_code`'s option-list walk, but answers the
+    binary visibility question instead: a ``program_file_letters`` flag or a
+    non-flag positional means the material is in a file; an inline flag,
+    ``bare_program``'s positional, or no positional at all (stdin/REPL) means
+    it is not. A ``<`` redirect is checked first and wins over ``bare_program``
+    -- ``awk < script.awk`` is a file, even though awk's bare positional rule
+    would otherwise read the redirect token as inline program text. Redirects
+    before the executor name are out of scope, as they are for the inline-code
+    scan this mirrors.
+    """
+    idx = 0
+    while idx < len(remaining):
+        tok = remaining[idx]
+        if tok.startswith("<") and tok != "<<":
+            return PROGRAM_SOURCE_FILE
+        if not tok.startswith("-") or tok == "-":
+            if tok == "-":
+                return PROGRAM_SOURCE_NOT_FILE
+            return PROGRAM_SOURCE_NOT_FILE if spec.bare_program else PROGRAM_SOURCE_FILE
+        if tok.startswith("--"):
+            if tok.split("=", 1)[0] in spec.inline_long:
+                return PROGRAM_SOURCE_NOT_FILE
+            idx += 1
+            continue
+        kind, consumed_next = _classify_flag_token(tok, spec)
+        if kind == "inline":
+            return PROGRAM_SOURCE_NOT_FILE
+        if kind == "program_file":
+            return PROGRAM_SOURCE_FILE
+        idx += 2 if consumed_next else 1
+    return PROGRAM_SOURCE_NOT_FILE
+
+
+def classify_program_source(cmd_text: str) -> str:
+    """Classify a leaf command's executable material as file or not-a-file.
+
+    :data:`PROGRAM_SOURCE_FILE` when a recognised interpreter (including
+    :data:`BASH_FAMILY`) runs a script named on the command line or
+    redirected from one; :data:`PROGRAM_SOURCE_NOT_FILE` for inline code,
+    stdin/REPL, or an unrecognised/absent executor -- material toolguard
+    cannot resolve to a file is treated as visible, matching the ask-floor's
+    existing bias in :func:`_detect_foreign_inline_code`.
+    """
+    tokens = cmd_text.split()
+    idx = _executor_index(tokens, include_bash_family=True)
+    if idx is None:
+        return PROGRAM_SOURCE_NOT_FILE
+    return _program_source_for_executor(tokens[idx + 1 :], _flags_for(tokens[idx]))
 
 
 def _detect_foreign_inline_code(cmd_text: str) -> bool:

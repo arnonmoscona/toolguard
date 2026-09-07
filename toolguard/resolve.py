@@ -38,7 +38,10 @@ from toolguard.constants import (
 )
 from toolguard.file_matching import check_file_path_hard_deny
 from toolguard.invocation import Invocation
-from toolguard.parser.command_extractor import command_spellings
+from toolguard.parser.command_extractor import (
+    classify_program_source,
+    command_spellings,
+)
 from toolguard.permission_resolution import (
     apply_parse_failure_floor,
     resolve_command_permission,
@@ -289,7 +292,10 @@ def resolve_bash_permission_detailed(
             )
 
         resolved = resolve_command_permission(
-            bash_context, sub_command, spellings=spellings
+            bash_context,
+            sub_command,
+            spellings=spellings,
+            program_source=classify_program_source(sub_command),
         )
         fallback_outcome = None
         if resolved.decision == DECISION_ALLOW and resolved.matched_rule is None:

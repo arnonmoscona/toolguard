@@ -20,6 +20,11 @@ permalink: toolguard/too-28/too-28-specification
 > 2. **§9** — the **"blocking prerequisite" status is lifted**. Documentation fetched 2026-09-05 plus this repository's own `<TEMPORARY>` fallback (which exists *because* toolguard ASKs stalled unattended auto-mode runs) settle that a toolguard `ask` and `deny` both bind in auto mode. Nothing in the design is contingent.
 > 3. **§9** — `autoMode.classifyAllShell` **appears in neither current documentation page**. Renamed, removed, or never there. A worked example of why a `[native]` claim carries a date.
 > 4. **§4.1's tail** — *"Install, security-audit and possibly maintenance flows must become aware..."* is **out of scope for TOO-28**, decided 2026-09-05. It is **TOO-77**, linked to this ticket. Without this amendment the ticket would be unfinishable against its own text.
+> 5. **§6.1 STANDS. One clarification only — 2026-09-07.** It is **`no_match_fallback`** that covers an unrecognised interpreter, not `undecidable_fallback`: the command is never classified undecidable, so the ASK floor does not apply. Both are §4.1 settings and both are now auto-mode-aware, so §6.1's conclusion — that the question dissolves into a capability this ticket already has — is correct as written.
+>
+>     I briefly recorded this as a false premise and a security gap. **That was wrong**, and Arnon corrected it: writing a rule for an interpreter toolguard has not been told about takes that command out of fallback coverage, which is what a rule does; toolguard cannot know `lua` is an interpreter without being told, and inferring it would need the heuristic this project deliberately does not have. The residue is one documentation line, not a defect — see §4.5.
+
+    **For §4.5**: a user who sets `undecidable_fallback` stricter than `no_match_fallback` is expressing *"I distrust foreign inline code"*, and that protection reaches only the interpreters in `FOREIGN_EXECUTORS`. Worth one sentence where those settings are documented, so nobody assumes it is exhaustive.
 >
 > **A provenance gap worth knowing**: this file was uncommitted when the raw estimate was sealed — it is one of the five paths in that record's `ignored_dirty`. So the exact bytes estimated against are not recoverable from git. Nothing to fix retroactively; a reason to commit a spec before sealing against it next time.
 

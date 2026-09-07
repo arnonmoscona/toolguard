@@ -27,7 +27,14 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from toolguard.constants import DECISION_ALLOW, DECISION_ASK, DECISION_DENY
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    FILE_TOOLS,
+    PROGRAM_SOURCE_FILE,
+    PROGRAM_SOURCE_NOT_FILE,
+)
 from toolguard.issues import Issue
 
 #: The table key holding a structured entry's permission pattern, e.g.
@@ -55,11 +62,25 @@ _VALID_AUTO_MODE_BEHAVIOR_VALUES = frozenset(
     {DECISION_ALLOW, DECISION_DENY, DECISION_ASK}
 )
 
+#: The enrichment key constraining this entry to one visibility of executable
+#: material (TOO-28 spec 4.3) -- e.g. ``program_source = "file"`` so a rule only
+#: matches ``python script.py``, not ``python -c "..."``. A guard, not a
+#: mapping: a mismatched command makes the rule not apply, same as if it had
+#: not matched at all. See :func:`toolguard.parser.command_extractor.classify_program_source`.
+PROGRAM_SOURCE_KEY = "program_source"
+
+#: Recognized values for :data:`PROGRAM_SOURCE_KEY`. The distinction is binary
+#: visibility, not an enumeration of heredoc/pipe/stdin/redirect/inline --
+#: see :data:`~toolguard.constants.PROGRAM_SOURCE_NOT_FILE`.
+_VALID_PROGRAM_SOURCE_VALUES = frozenset({PROGRAM_SOURCE_FILE, PROGRAM_SOURCE_NOT_FILE})
+
 #: Enrichment keys this toolguard version understands. ``match`` is the
 #: pattern key (:data:`PATTERN_KEY`), not an enrichment key, and is
 #: deliberately absent here. An unknown key is a WARNING, never an error --
 #: a newer config read by an older toolguard must degrade, not break.
-KNOWN_ENRICHMENT_KEYS = frozenset({ADDITIONAL_CONTEXT_KEY, AUTO_MODE_BEHAVIOR_KEY})
+KNOWN_ENRICHMENT_KEYS = frozenset(
+    {ADDITIONAL_CONTEXT_KEY, AUTO_MODE_BEHAVIOR_KEY, PROGRAM_SOURCE_KEY}
+)
 
 #: Structural matcher for a ``Tool(inner)`` permission wrapper: an
 #: identifier followed by a parenthesised body. The greedy ``.*`` lets the
@@ -118,6 +139,13 @@ def is_tool_wrapper(pattern: object) -> bool:
         ``identifier(...)`` tool wrapper.
     """
     return isinstance(pattern, str) and _TOOL_WRAPPER_RE.fullmatch(pattern) is not None
+
+
+def _pattern_tool_name(pattern: str) -> Optional[str]:
+    """The tool name a ``Tool(...)``-wrapped *pattern* names, or ``None`` if unwrapped."""
+    if _TOOL_WRAPPER_RE.fullmatch(pattern) is None:
+        return None
+    return pattern.split("(", 1)[0]
 
 
 def strip_tool_wrapper(pattern: str) -> str:
@@ -233,6 +261,33 @@ class RuleEntry:
         if value in _VALID_AUTO_MODE_BEHAVIOR_VALUES:
             return value
         return None
+
+    @property
+    def program_source(self) -> Optional[str]:
+        """
+        The visibility of executable material this entry requires, if any.
+
+        The single accessor for ``program_source`` -- mirrors :attr:`auto_mode_behavior`:
+        an unrecognized value yields ``None`` here (reported separately as a validation
+        error, see :func:`_program_source_issues`), so the guard is simply absent rather
+        than a string no resolver recognizes. Also ``None`` on a file-path tool's
+        pattern (:data:`~toolguard.constants.FILE_TOOLS`) -- the key never applies
+        there, and this accessor is what
+        :func:`~toolguard.permission_resolution.resolve_command_permission`'s
+        pre-match filtering (:func:`~toolguard.permission_resolution._level_pattern_buckets`)
+        reads to drop such an entry before it ever reaches the matcher.
+
+        Returns:
+            :data:`~toolguard.constants.PROGRAM_SOURCE_FILE` or
+            :data:`~toolguard.constants.PROGRAM_SOURCE_NOT_FILE`, or ``None`` when this
+            entry carries no usable guard.
+        """
+        value = self.metadata.get(PROGRAM_SOURCE_KEY)
+        if value not in _VALID_PROGRAM_SOURCE_VALUES:
+            return None
+        if _pattern_tool_name(self.pattern) in FILE_TOOLS:
+            return None
+        return value
 
     @property
     def is_structured(self) -> bool:
@@ -456,6 +511,7 @@ def normalize_entry(
         )
         issues += _additional_context_issues(pattern, metadata)
         issues += _auto_mode_behavior_issues(pattern, metadata)
+        issues += _program_source_issues(pattern, metadata)
         return RuleEntry(pattern=pattern, metadata=metadata, raw=raw), issues
 
     return _reject(
@@ -544,6 +600,62 @@ def _auto_mode_behavior_issues(pattern: str, metadata: Mapping[str, object]) -> 
                 f"its auto-mode decision will be ignored."
             ),
             corrective_steps=f"Set '{AUTO_MODE_BEHAVIOR_KEY}' to one of: {accepted}.",
+        ),
+    )
+
+
+def _program_source_issues(pattern: str, metadata: Mapping[str, object]) -> tuple:
+    """
+    Validate an ``program_source`` value, if the entry carries one.
+
+    Same shape as :func:`_auto_mode_behavior_issues` for an unrecognized value: an
+    ``error``-level issue, but the rule still applies and only the guard is ignored
+    (see :attr:`RuleEntry.program_source`).
+
+    A ``Tool(...)`` naming a file-path tool (:data:`~toolguard.constants.FILE_TOOLS`)
+    is different: ``program_source`` classifies commands, never file paths, so the key
+    can never take effect there at all. Rejected outright (an ``error`` covering the
+    whole key, regardless of the value) rather than silently accepted-and-inert --
+    :func:`resolve_permission_cascade`'s own guard already makes it inert in
+    practice, but a key that can never work belongs in the config diagnostics, not
+    discovered by its absence.
+
+    Args:
+        pattern: The entry's pattern, for the message.
+        metadata: The entry's enrichment mapping.
+
+    Returns:
+        A tuple of zero or one Issue.
+    """
+    if PROGRAM_SOURCE_KEY not in metadata:
+        return ()
+    tool_name = _pattern_tool_name(pattern)
+    if tool_name in FILE_TOOLS:
+        return (
+            Issue(
+                level="error",
+                message=(
+                    f"'{PROGRAM_SOURCE_KEY}' has no effect in the rule entry for "
+                    f"'{pattern}' -- {tool_name!r} is a file-path tool, and "
+                    f"'{PROGRAM_SOURCE_KEY}' only classifies commands."
+                ),
+                corrective_steps=f"Remove '{PROGRAM_SOURCE_KEY}' from this entry; it "
+                "only applies to Bash/command-tool rules.",
+            ),
+        )
+    value = metadata[PROGRAM_SOURCE_KEY]
+    if value in _VALID_PROGRAM_SOURCE_VALUES:
+        return ()
+    accepted = ", ".join(sorted(_VALID_PROGRAM_SOURCE_VALUES))
+    return (
+        Issue(
+            level="error",
+            message=(
+                f"'{PROGRAM_SOURCE_KEY}' is not a recognized value in the rule entry "
+                f"for '{pattern}', got {value!r} -- the rule still applies, but its "
+                f"program-source guard will be ignored."
+            ),
+            corrective_steps=f"Set '{PROGRAM_SOURCE_KEY}' to one of: {accepted}.",
         ),
     )
 

@@ -59,6 +59,13 @@ FALLBACK_OUTCOME_WARNED = "warned"
 FALLBACK_OUTCOME_SILENT = "silent"
 FALLBACK_OUTCOME_DENIED = "denied"
 
+#: A rule's ``program_source`` guard (TOO-28 spec 4.3): whether a command's executable
+#: material is visible on the command line, or hidden in a file toolguard cannot read.
+#: Binary by design -- not an enumeration of heredoc/pipe/stdin/redirect/inline, all of
+#: which are ``PROGRAM_SOURCE_NOT_FILE``.
+PROGRAM_SOURCE_FILE = "file"
+PROGRAM_SOURCE_NOT_FILE = "not_file"
+
 #: Timeout, in seconds, for git subprocesses run through
 #: :func:`toolguard._git.run_git` -- guards against a hang or an
 #: interactive credential prompt.

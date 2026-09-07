@@ -41,6 +41,7 @@ all. This costs a small amount of extra matching: a level is matched even when a
 more-specific level already decided the outcome.
 """
 
+import dataclasses
 from typing import List, Optional, Sequence, Tuple
 
 from toolguard.config_types import (
@@ -189,7 +190,7 @@ def _detect_override(
         if result is not None and result.decision == DECISION_DENY:
             overridden_pattern = result.matched_pattern
             overridden_prov = provenance_for_pattern(
-                layers, overridden_pattern, DECISION_DENY
+                layers, overridden_pattern, _real_group(result)
             )
             return ConflictOverride(
                 winning_pattern=winning_pattern,
@@ -198,6 +199,45 @@ def _detect_override(
                 overridden_provenance=overridden_prov,
             )
     return None
+
+
+def _real_group(result: LevelMatch) -> str:
+    """
+    The list *result*'s rule is actually written in, for a provenance/entry lookup.
+
+    ``result.decision`` is the EFFECTIVE group (TOO-28 spec 4.2/4.3: what the rule
+    resolves to, after an ``auto_mode_behavior`` migration); ``matched_entry_kind``
+    is the ACTUAL one (the list it lives in), set by
+    :func:`resolve_command_permission`/:func:`resolve_file_path_permission`, the only
+    callers that know which entry produced ``matched_pattern``. Falls back to
+    ``decision`` when unset -- a hand-built ``LevelMatch`` in a test, or any future
+    caller that never migrates groups, for which the two are the same value anyway.
+    """
+    return (
+        result.matched_entry_kind
+        if result.matched_entry_kind is not None
+        else result.decision
+    )
+
+
+def _reason_naming_real_group(result: LevelMatch) -> str:
+    """
+    *result.reason*, with its "matches {decision} pattern" clause renamed to the
+    rule's REAL list when a migration moved it.
+
+    :mod:`toolguard.permissions`/:mod:`toolguard.file_matching` build this exact
+    literal clause naming ``result.decision`` -- the EFFECTIVE group, since that is
+    genuinely which bucket the pattern was matched from. A reader grepping their
+    ``ask`` list for a rule described as "matches allow pattern" would not find it
+    (Arnon, 2026-09-07). The suffix :func:`_resolve_unclamped` appends already states
+    what moved it; this states what the author actually wrote.
+    """
+    real_group = _real_group(result)
+    if real_group == result.decision:
+        return result.reason
+    return result.reason.replace(
+        f"matches {result.decision} pattern:", f"matches {real_group} pattern:", 1
+    )
 
 
 def _matched_rule_lookup(layers: Tuple[ToolPatternLayer, ...], result: LevelMatch):
@@ -212,13 +252,11 @@ def _matched_rule_lookup(layers: Tuple[ToolPatternLayer, ...], result: LevelMatc
     :func:`~toolguard.config_types.entry_for_pattern`, which this delegates to, for
     the real types.
 
-    Keyed by ``result.decision`` -- read directly off the already-built, frozen
-    ``LevelMatch``, never copied to a local that a later edit could reassign.
-    Structural, not just ordered correctly: a per-rule auto-mode decision
-    (TOO-28 spec 4.2) is computed from THIS function's return value, so it
-    cannot be fed back in as the lookup key without first constructing a new
-    ``LevelMatch`` -- reordering statements in the caller cannot reintroduce the
-    hazard this guards against (searching the wrong allow/deny/ask list).
+    Keyed by :func:`_real_group`, never by ``result.decision`` directly -- a rule
+    migrated to a different effective group by ``auto_mode_behavior`` still lives in
+    its real list, and that is what must be searched for provenance/``additionalContext``
+    to survive the migration (Arnon, 2026-09-07: "decision and group used to be the
+    same thing"; they no longer are).
 
     Args:
         layers: The matched level's contributing layers.
@@ -227,8 +265,9 @@ def _matched_rule_lookup(layers: Tuple[ToolPatternLayer, ...], result: LevelMatc
     Returns:
         ``(provenance, winning_entry)``, either possibly ``None``.
     """
-    prov = provenance_for_pattern(layers, result.matched_pattern, result.decision)
-    winning_entry = entry_for_pattern(layers, result.matched_pattern, result.decision)
+    real_group = _real_group(result)
+    prov = provenance_for_pattern(layers, result.matched_pattern, real_group)
+    winning_entry = entry_for_pattern(layers, result.matched_pattern, real_group)
     return prov, winning_entry
 
 
@@ -238,15 +277,17 @@ def _resolve_unclamped(
     has_any_rules: bool,
     no_match_fallback: str,
     subject: str = "Command",
-    permission_mode: Optional[str] = None,
 ) -> RuntimeVerdict:
     """
     The raw more-specific-wins fold, BEFORE the TOO-19 ASK floor.
 
-    Pure: *levels* already carries every hierarchy level's match, computed by
-    the caller. The first level (most-specific first) whose match is not
-    ``None`` wins. No match at any level falls through to the TOO-15 branch
-    below (unconfigured tool vs. ``no_match_fallback``).
+    Pure: *levels* already carries every hierarchy level's match, computed by the
+    caller -- including, per rule, whether an ``program_source`` guard (TOO-28 spec 4.3)
+    passed and which EFFECTIVE group an ``auto_mode_behavior`` migration (spec 4.2)
+    placed it in. Neither is decided here: a rule whose guard failed was never
+    offered to the matcher in the first place (see
+    :func:`resolve_command_permission`/:func:`resolve_file_path_permission`), so
+    "the first level whose match is not ``None`` wins" already means what it says.
 
     Args:
         levels: One entry per hierarchy level, most-specific first -- see
@@ -259,14 +300,6 @@ def _resolve_unclamped(
             :meth:`~toolguard.config_types.ResolutionConfig.resolved_no_match_fallback`.
         subject: The noun the no-match-fallback reason (below) opens with --
             ``"Command"`` for Bash, ``"Path"`` for a file-path tool.
-        permission_mode: Claude Code's own permission mode (TOO-28 spec 4.2), or
-            ``None``. When it is :data:`~toolguard.config_types.AUTO_PERMISSION_MODE`
-            and the winning rule declares its own ``auto_mode_behavior`` decision
-            (see :attr:`~toolguard.rule_entry.RuleEntry.auto_mode_behavior`), that
-            decision replaces the matched level's own -- applied only AFTER
-            :func:`_matched_rule_lookup`, which resolves provenance/entry from the
-            level's REAL matched decision, never from one an auto-mode declaration
-            may since have replaced.
 
     Returns the internal cascade verdict, with ``tool``/``target`` left
     ``None`` (this function is never handed a target string) and
@@ -281,35 +314,30 @@ def _resolve_unclamped(
         if result is None:
             continue
         prov, winning_entry = _matched_rule_lookup(layers, result)
-        reason_with_prov = _append_provenance(result.reason, prov)
+        reason_with_prov = _append_provenance(_reason_naming_real_group(result), prov)
         additional_context = (
             winning_entry.additional_context if winning_entry is not None else None
         )
 
-        # The rule's own auto-mode decision (TOO-28 spec 4.2). Reads
-        # result.decision directly, never a copy -- result is an already-built,
-        # frozen LevelMatch, so this and _matched_rule_lookup above are both
-        # structurally pinned to the level's one real matched outcome; there is
-        # no local "decision" variable a future edit could reassign ahead of the
-        # lookup and send it searching the wrong allow/deny/ask list.
-        effective_decision = result.decision
+        # decision is the EFFECTIVE group (already migrated by the caller's
+        # pre-match bucketing, if auto_mode_behavior applied); matched_entry_kind
+        # is the rule's ACTUAL one. They differ only when a migration happened --
+        # state that plainly, in Phase 3's original wording, so the reason names
+        # both the rule that matched and the behaviour that moved it.
         if (
-            permission_mode == AUTO_PERMISSION_MODE
-            and winning_entry is not None
-            and winning_entry.auto_mode_behavior is not None
-            and winning_entry.auto_mode_behavior != result.decision
+            result.matched_entry_kind is not None
+            and result.matched_entry_kind != result.decision
         ):
-            effective_decision = winning_entry.auto_mode_behavior
             reason_with_prov = (
-                f"{reason_with_prov} -- auto_mode_behavior={effective_decision!r} "
+                f"{reason_with_prov} -- auto_mode_behavior={result.decision!r} "
                 f"applied (permission_mode=auto)"
             )
 
         override = None
-        if effective_decision == DECISION_ALLOW:
+        if result.decision == DECISION_ALLOW:
             override = _detect_override(levels, index, result.matched_pattern, prov)
         return RuntimeVerdict(
-            decision=effective_decision,
+            decision=result.decision,
             reason=reason_with_prov,
             provenance=prov,
             overrides=[(None, override)] if override is not None else [],
@@ -395,7 +423,6 @@ def resolve_permission_cascade(
     has_any_rules: bool,
     no_match_fallback: str,
     subject: str = "Command",
-    permission_mode: Optional[str] = None,
 ) -> RuntimeVerdict:
     """
     Resolve a decision from already-computed per-level matches -- the pure fold.
@@ -408,9 +435,11 @@ def resolve_permission_cascade(
     Pure: no matching happens here, and nothing here is a callable or a
     ``config`` object -- every level's match was already computed by the
     caller (:func:`resolve_command_permission`/:func:`resolve_file_path_permission`
-    in production; a hand-built list in a test). This is what lets the
-    cascade -- more-specific-wins, override detection, the ASK floor -- be
-    tested in isolation from real pattern matching.
+    in production; a hand-built list in a test), including any
+    ``program_source``/``auto_mode_behavior`` (TOO-28 spec 4.2/4.3) effect on
+    which patterns a level's match was even attempted against. This is what
+    lets the cascade -- more-specific-wins, override detection, the ASK floor
+    -- be tested in isolation from real pattern matching.
 
     The ASK floor is applied here, at the cascade's own chokepoint, rather
     than in the Bash-specific compound pipeline (:mod:`toolguard.compound`),
@@ -429,13 +458,13 @@ def resolve_permission_cascade(
         subject: Forwarded to :func:`_resolve_unclamped` -- see that
             parameter's own docstring. Defaults to ``"Command"``;
             :func:`resolve_file_path_permission` passes ``"Path"``.
-        permission_mode: Forwarded to :func:`_resolve_unclamped` -- see that
-            parameter's own docstring. The ASK floor below is unconditional and
-            does not consult it: a per-rule auto-mode decision is floored exactly
-            like any other decision when a governed config file failed to parse.
     """
     resolved = _resolve_unclamped(
-        levels, tool_name, has_any_rules, no_match_fallback, subject, permission_mode
+        levels,
+        tool_name,
+        has_any_rules,
+        no_match_fallback,
+        subject,
     )
     return _apply_ask_floor(parse_failures, resolved)
 
@@ -452,11 +481,93 @@ def _effective_no_match_fallback(context: ResolutionContext) -> str:
     return context.config.resolved_no_match_fallback()
 
 
+def _effective_kind(entry, real_kind: str, permission_mode: Optional[str]) -> str:
+    """
+    The group *entry* is matched under: its own ``auto_mode_behavior`` (TOO-28 spec
+    4.2) when Claude Code's permission mode is auto and the entry declares one,
+    else *real_kind* -- the list it is actually written in.
+    """
+    if permission_mode == AUTO_PERMISSION_MODE and entry.auto_mode_behavior is not None:
+        return entry.auto_mode_behavior
+    return real_kind
+
+
+def _level_pattern_buckets(
+    layers: Tuple[ToolPatternLayer, ...],
+    command_program_source: Optional[str],
+    permission_mode: Optional[str],
+):
+    """
+    This level's allow/deny/ask patterns, built directly from entries rather than
+    from :attr:`ToolPatternLayer.allow`/``deny``/``ask``, plus an index recovering
+    each winning pattern's real list.
+
+    Two entry-level effects, both decided HERE, before any matching, so a rule that
+    does not apply was simply never offered to the matcher -- there is no
+    post-match state to unwind:
+
+    - An entry whose ``program_source`` guard (spec 4.3) fails for
+      *command_program_source* -- including when *command_program_source* is ``None``,
+      as for file-path resolution, where no guard can ever be evaluated -- is
+      dropped. It did not match, so it cannot suppress a sibling pattern in the
+      same list, and pattern order stops mattering.
+    - Under auto mode, an entry declaring ``auto_mode_behavior`` (spec 4.2) is
+      bucketed by that decision (its EFFECTIVE group) rather than by the list it
+      is written in (its ACTUAL group) -- see :func:`_effective_kind` -- so
+      deny-first precedence and more-specific-wins apply to what the rule DOES.
+
+    Returns:
+        ``(allow_patterns, deny_patterns, ask_patterns, real_kind_by_match)`` --
+        the last a ``{(effective_kind, pattern): real_kind}`` map, since decision
+        and real list can now differ (Arnon, 2026-09-07: "decision and group used
+        to be the same thing"); :func:`resolve_command_permission`/
+        :func:`resolve_file_path_permission` use it to tag the winning
+        :class:`~toolguard.config_types.LevelMatch` with
+        ``matched_entry_kind`` so provenance/``additionalContext`` lookups search
+        the rule's real list, never the effective one.
+    """
+    buckets = {DECISION_ALLOW: [], DECISION_DENY: [], DECISION_ASK: []}
+    real_kind_by_match = {}
+    for layer in layers:
+        for real_kind, entries in (
+            (DECISION_ALLOW, layer.allow_entries),
+            (DECISION_DENY, layer.deny_entries),
+            (DECISION_ASK, layer.ask_entries),
+        ):
+            for entry in entries:
+                if entry.program_source is not None and (
+                    command_program_source is None
+                    or entry.program_source != command_program_source
+                ):
+                    continue
+                effective_kind = _effective_kind(entry, real_kind, permission_mode)
+                pattern = entry.stripped_pattern
+                buckets[effective_kind].append(pattern)
+                real_kind_by_match.setdefault((effective_kind, pattern), real_kind)
+    return (
+        buckets[DECISION_ALLOW],
+        buckets[DECISION_DENY],
+        buckets[DECISION_ASK],
+        real_kind_by_match,
+    )
+
+
+def _tag_real_kind(
+    result: Optional[LevelMatch], real_kind_by_match: dict
+) -> Optional[LevelMatch]:
+    """Attach ``matched_entry_kind`` (see :func:`_level_pattern_buckets`) to *result*."""
+    if result is None:
+        return None
+    real_kind = real_kind_by_match.get((result.decision, result.matched_pattern))
+    return dataclasses.replace(result, matched_entry_kind=real_kind)
+
+
 def resolve_command_permission(
     context: ResolutionContext,
     command: str,
     *,
     spellings: CommandSpellings = CommandSpellings(),
+    program_source: Optional[str] = None,
 ) -> RuntimeVerdict:
     """
     Resolve one (already-decomposed) command against ``context.tool_name``'s cascade.
@@ -474,29 +585,35 @@ def resolve_command_permission(
             import ``test/unit/test_architecture.py``'s per-module allow-list rejects.
             Omitting it matches *command* as spelled, which is what a caller with no
             leaf in hand should do.
+        program_source: *command*'s own :func:`~toolguard.parser.command_extractor.classify_program_source`
+            result, built by the caller for the same reason *spellings* is --
+            used to filter which entries :func:`_level_pattern_buckets` even
+            offers to the matcher.
     """
     levels = context.config.permission_levels_with_provenance(context.tool_name)
-    matched_levels: List[LevelOutcome] = [
-        (
+    matched_levels: List[LevelOutcome] = []
+    for _allow, _deny, _ask, layers in levels:
+        allow_p, deny_p, ask_p, real_kind_by_match = _level_pattern_buckets(
+            layers, program_source, context.permission_mode
+        )
+        result = _tag_real_kind(
             decide_command_at_level_detailed(
                 command,
-                list(allow),
-                list(deny),
+                allow_p,
+                deny_p,
                 context.extended_syntax,
-                ask_patterns=list(ask),
+                ask_patterns=ask_p,
                 spellings=spellings,
             ),
-            layers,
+            real_kind_by_match,
         )
-        for allow, deny, ask, layers in levels
-    ]
+        matched_levels.append((result, layers))
     return resolve_permission_cascade(
         matched_levels,
         context.tool_name,
         context.config.parse_failures,
         context.config.has_any_rules(context.tool_name),
         _effective_no_match_fallback(context),
-        permission_mode=context.permission_mode,
     )
 
 
@@ -522,20 +639,27 @@ def resolve_file_path_permission(
         file_path: The file path under evaluation.
     """
     levels = context.config.permission_levels_with_provenance(context.tool_name)
-    matched_levels: List[LevelOutcome] = [
-        (
+    matched_levels: List[LevelOutcome] = []
+    for _allow, _deny, _ask, layers in levels:
+        # command_program_source=None: a file path is never classified, so an
+        # program_source-carrying entry (already rejected at config time, see
+        # rule_entry._program_source_issues) is dropped rather than matched --
+        # see _level_pattern_buckets's own docstring for why None means that.
+        allow_p, deny_p, ask_p, real_kind_by_match = _level_pattern_buckets(
+            layers, None, context.permission_mode
+        )
+        result = _tag_real_kind(
             decide_file_path_at_level_detailed(
                 file_path,
-                list(allow),
-                list(deny),
+                allow_p,
+                deny_p,
                 context.config,
                 context.extended_syntax,
-                ask_patterns=list(ask),
+                ask_patterns=ask_p,
             ),
-            layers,
+            real_kind_by_match,
         )
-        for allow, deny, ask, layers in levels
-    ]
+        matched_levels.append((result, layers))
     return resolve_permission_cascade(
         matched_levels,
         context.tool_name,
@@ -543,5 +667,4 @@ def resolve_file_path_permission(
         context.config.has_any_rules(context.tool_name),
         _effective_no_match_fallback(context),
         subject="Path",
-        permission_mode=context.permission_mode,
     )

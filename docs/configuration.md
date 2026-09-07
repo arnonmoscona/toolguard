@@ -35,6 +35,8 @@ question in front of you.
   settings above differently when Claude Code's own permission mode is auto
 - [Per-rule auto-mode behavior](#per-rule-auto-mode-behavior) -- one rule declaring its own
   decision for auto mode
+- [Program-source constraint](#program-source-constraint) -- a rule that applies only when
+  executable material is (or is not) a file
 - [Assignments looked past when granting](#assignments-looked-past-when-granting) -- letting
   an allow rule see past a leading `VAR=value`
 - [Verifying configuration](#verifying-configuration)
@@ -702,7 +704,32 @@ ask = [
 
 **Not called "override" anywhere in code or docs.** `RuntimeVerdict.overrides` already means allow-over-deny conflict detection (a *different* rule at a less-specific level being superseded) -- reusing that word for a rule's own auto-mode decision would recreate the vocabulary split this project has already spent a commit removing. An allow this key produces is still checked for that kind of conflict like any other allow.
 
+**Under auto mode, a rule with `auto_mode_behavior` competes on its DECLARED decision's precedence, not the list it is written in.** Matching is deny-first within a level: a `deny`-list rule declaring `auto_mode_behavior = "allow"` is matched as an allow, so it no longer wins deny-first precedence over a sibling deny rule that still applies. Arnon, 2026-09-07: *"a rule's group determines its precedence"* -- so `auto_mode_behavior` genuinely moves a rule to a different group before matching, rather than rewriting a decision after the fact. Provenance and `additionalContext` still name the rule's real list; the reason text states when the behaviour applied.
+
 Behaviour-neutral when no rule carries the key: nothing changes in any mode.
+
+## Program-source constraint
+
+`program_source` constrains a rule to one visibility of a command's executable material -- is it a file, or not. Like `auto_mode_behavior`, it rides on the structured-entry mechanism rather than a new pattern dialect:
+
+```toml
+[permissions]
+allow = [
+    { match = "Bash([regex]^uv run python\\b)", program_source = "file" },
+]
+```
+
+**The distinction is visibility, not an enumeration of how the material arrived.** `"file"` means toolguard can see a path but not what is in it -- inline code, a pipe, stdin, and a heredoc are all `"not_file"`, even though none of them is a file either; a redirect *from* a file (`awk < script.awk`) counts as `"file"`, since the question is where the material is, not the shape of the syntax that reached it.
+
+A rule carrying `program_source` matches only when the classification agrees; otherwise the rule did not match at all, and pattern order does not matter. Arnon, 2026-09-07: *"a rule match should be considered on the whole rule, not just the pattern match... the guarded form... simply would not be considered a match in the first place, masking nothing."* A guarded rule that does not apply to a command is filtered out before matching even runs, so an unguarded sibling pattern for the same command is unaffected by where the guarded one sits in the list.
+
+**Scope is Bash and MCP-terminal command resolution only.** File-path resolution (Read/Write/Edit) computes no such classification, so `program_source` can never take effect there. It is **rejected at config time** -- an `error`-level issue naming the key and the tool, same shape as an unrecognized value below.
+
+**Recognized values are `"file"` and `"not_file"`.** An unrecognized value is a config-time issue: the rule still applies normally, only its guard is ignored.
+
+**`[hard_deny]` is the one exception, and it is absolute**, for the same reason `auto_mode_behavior` is: `Configuration.hard_deny()` never exposes a hard-deny entry's enrichment metadata at all.
+
+Behaviour-neutral when no rule carries the key: nothing changes.
 
 ## Assignments looked past when granting
 

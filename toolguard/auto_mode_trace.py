@@ -52,7 +52,7 @@ from typing import Optional
 #: entry a human decides they don't like in retrospect.
 #: - 'no_match': toolguard read the target fine; addressable by writing a rule.
 #: - 'undecidable': toolguard could not read the target at all -- NO RULE
-#:   CAN EVER COVER IT; needs the input-source constraint (spec 4.3) or
+#:   CAN EVER COVER IT; needs the program-source constraint (spec 4.3) or
 #:   auto-mode guidance instead. This is precisely the case where the right
 #:   answer is NOT "make toolguard smarter so it can pattern this" -- spec
 #:   section 2 names that as the design smell this field exists to let a

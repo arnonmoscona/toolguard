@@ -20,7 +20,8 @@ from toolguard.config import (
 )
 from toolguard.claude_code_contract import PreToolUseEvent, read_pre_tool_use_event
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
-from toolguard.config_types import RuntimeVerdict
+from toolguard.config_types import RuntimeVerdict, ToolPatternLayer
+from toolguard.rule_entry import RuleEntry
 from toolguard.hook import (
     FILE_PATH_TOOLS,
     _classify_fallback_cause,
@@ -149,13 +150,25 @@ def _fake_config(
             return raw_path
 
         def permission_levels_with_provenance(self_inner, tool_name):
-            # toolguard.permission_resolution reads this directly. The fake
-            # models one hierarchy level with no provenance layers, so
-            # provenance lookups against it resolve to None.
+            # toolguard.permission_resolution reads this directly, and builds
+            # its per-level pattern lists from the layer's entries (TOO-28),
+            # not from the plain allow/deny tuples below -- so this fake must
+            # carry a real ToolPatternLayer with entries, or every pattern
+            # here is silently invisible to the matcher. A plain RuleEntry
+            # (no metadata) behaves identically to a bare pattern string for
+            # every existing test: program_source/auto_mode_behavior are both
+            # None, so no entry is ever filtered or regrouped.
             allow, deny = _patterns_for(tool_name)
             if not (allow or deny):
                 return ()
-            return ((tuple(allow), tuple(deny), (), ()),)
+            layer = ToolPatternLayer(
+                provenance=Provenance(
+                    "project", "toolguard_hook", "toml", Path("/fake.toml"), 0
+                ),
+                allow_entries=tuple(RuleEntry(pattern=p) for p in allow),
+                deny_entries=tuple(RuleEntry(pattern=p) for p in deny),
+            )
+            return ((tuple(allow), tuple(deny), (), (layer,)),)
 
         def has_any_rules(self_inner, tool_name):
             allow, deny = _patterns_for(tool_name)

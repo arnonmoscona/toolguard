@@ -152,6 +152,14 @@ entry over letting it silently go stale.
   `[hard_deny]`: the key is silently ignored there, and nothing can carve an exception out of
   a hard deny. See
   [configuration.md#per-rule-auto-mode-behavior](configuration.md#per-rule-auto-mode-behavior).
+- **Q: Can a rule apply only when the command's executable material is (or is not) a file?**
+  A: Yes -- `program_source` on a structured rule entry (`{ match = "...", program_source = "file" }`
+  or `"not_file"`), for Bash/MCP-terminal resolution only -- rejected at config time on a
+  Read/Write/Edit pattern (an `error` issue), not silently inert. A rule whose guard fails did
+  not match at all: it is filtered out before matching runs, so an unguarded sibling pattern in
+  the same list is unaffected regardless of order. `[hard_deny]` ignores the key, same as
+  `auto_mode_behavior`. See
+  [configuration.md#program-source-constraint](configuration.md#program-source-constraint).
 - **Q: What happens to Claude Code's own `Bash(*)`-style blanket allows once Takeover Mode
   is enabled?**
   A: Stripped from native settings as they're loaded, so they can't bypass the real
@@ -283,6 +291,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Undecidable fallback](configuration.md#undecidable-fallback)
 - [Fallback settings in auto mode](configuration.md#fallback-settings-in-auto-mode)
 - [Per-rule auto-mode behavior](configuration.md#per-rule-auto-mode-behavior)
+- [Program-source constraint](configuration.md#program-source-constraint)
 - [Assignments looked past when granting](configuration.md#assignments-looked-past-when-granting)
 - [Verifying configuration](configuration.md#verifying-configuration)
 - [Environment variables](configuration.md#environment-variables)

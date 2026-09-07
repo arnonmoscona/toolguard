@@ -433,11 +433,24 @@ class LevelMatch:
             :func:`~toolguard.permission_resolution._resolve_unclamped`).
         matched_pattern: The winning (wrapper-free) pattern text. Always a
             genuine ``str`` when a ``LevelMatch`` is constructed at all.
+        matched_entry_kind: The rule's ACTUAL group (``'allow'``/``'deny'``/``'ask'``)
+            -- the list it is really written in, as opposed to ``decision``, its
+            EFFECTIVE group after an ``auto_mode_behavior`` migration (TOO-28 spec
+            4.2). The two are the same value except when a rule has migrated groups,
+            which is why this is a separate field rather than derived from
+            ``decision``: :func:`~toolguard.permission_resolution._matched_rule_lookup`
+            keys provenance/entry lookups off this field, never off ``decision``, so a
+            migrated rule's provenance still names the list it actually lives in.
+            ``None`` when unset -- :mod:`~toolguard.permissions`/
+            :mod:`~toolguard.file_matching` never set it; it is filled in by
+            :mod:`~toolguard.permission_resolution`'s own callers, which alone know
+            which entry produced ``matched_pattern``.
     """
 
     decision: str
     reason: str
     matched_pattern: str
+    matched_entry_kind: Optional[str] = None
 
 
 @dataclass(frozen=True)

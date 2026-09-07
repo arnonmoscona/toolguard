@@ -9,11 +9,18 @@ import dataclasses
 import unittest
 from types import MappingProxyType
 
-from toolguard.constants import DECISION_ALLOW, DECISION_ASK, DECISION_DENY
+from toolguard.constants import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    PROGRAM_SOURCE_FILE,
+    PROGRAM_SOURCE_NOT_FILE,
+)
 from toolguard.issues import Issue
 from toolguard.rule_entry import (
     ADDITIONAL_CONTEXT_KEY,
     AUTO_MODE_BEHAVIOR_KEY,
+    PROGRAM_SOURCE_KEY,
     KNOWN_ENRICHMENT_KEYS,
     PATTERN_KEY,
     MergeConflict,
@@ -1154,19 +1161,22 @@ class TestModuleConstants(unittest.TestCase):
         """
         self.assertEqual(PATTERN_KEY, "match")
 
-    def test_known_enrichment_keys_holds_additional_context_and_auto_mode_behavior_only(
+    def test_known_enrichment_keys_holds_additional_context_auto_mode_behavior_and_program_source_only(
         self,
     ):
         """
         Given the KNOWN_ENRICHMENT_KEYS constant
         When inspected
-        Then it is a frozenset holding exactly "additionalContext" and
-             "auto_mode_behavior" (TOO-28 spec 4.2) -- "match" (PATTERN_KEY)
-             is never itself an enrichment key
+        Then it is a frozenset holding exactly "additionalContext",
+             "auto_mode_behavior" (TOO-28 spec 4.2) and "program_source"
+             (TOO-28 spec 4.3) -- "match" (PATTERN_KEY) is never itself an
+             enrichment key
         """
         self.assertEqual(
             KNOWN_ENRICHMENT_KEYS,
-            frozenset({ADDITIONAL_CONTEXT_KEY, AUTO_MODE_BEHAVIOR_KEY}),
+            frozenset(
+                {ADDITIONAL_CONTEXT_KEY, AUTO_MODE_BEHAVIOR_KEY, PROGRAM_SOURCE_KEY}
+            ),
         )
         self.assertIsInstance(KNOWN_ENRICHMENT_KEYS, frozenset)
         self.assertNotIn(PATTERN_KEY, KNOWN_ENRICHMENT_KEYS)
@@ -1440,6 +1450,138 @@ class TestAutoModeBehavior(unittest.TestCase):
         )
         self.assertEqual(issues, ())
         self.assertEqual(entry.auto_mode_behavior, DECISION_ALLOW)
+
+
+class TestProgramSource(unittest.TestCase):
+    """The `program_source` enrichment key (TOO-28 spec 4.3): registry entry, valid-value constraint, and the `RuleEntry.program_source` accessor."""
+
+    def test_program_source_is_a_known_enrichment_key(self):
+        """
+        Given this toolguard version
+        When the known-enrichment-key registry is inspected
+        Then 'program_source' is present, so it does not warn as unknown
+        """
+        self.assertIn(PROGRAM_SOURCE_KEY, KNOWN_ENRICHMENT_KEYS)
+
+    def test_each_valid_value_is_accepted_without_issues(self):
+        """
+        Given a structured entry whose program_source is each of the two values
+            in turn
+        When it is normalized
+        Then it normalizes cleanly and the accessor returns that value
+        """
+        for value in (PROGRAM_SOURCE_FILE, PROGRAM_SOURCE_NOT_FILE):
+            with self.subTest(value=value):
+                entry, issues = normalize_entry(
+                    {PATTERN_KEY: "Bash(uv run python *)", PROGRAM_SOURCE_KEY: value},
+                    is_native=False,
+                )
+                self.assertEqual(issues, ())
+                self.assertEqual(entry.program_source, value)
+
+    def test_unrecognized_value_reports_an_error_but_keeps_the_rule(self):
+        """
+        Given a structured entry whose program_source is not one of the two
+            recognized values
+        When it is normalized
+        Then an error-level issue is reported, the RULE still normalizes, and
+            the accessor returns None so no guard applies
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(uv run python *)", PROGRAM_SOURCE_KEY: "inline"},
+            is_native=False,
+        )
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.pattern, "Bash(uv run python *)")
+        self.assertIsNone(entry.program_source)
+        self.assertEqual([i.level for i in issues], ["error"])
+        self.assertIn(PROGRAM_SOURCE_KEY, issues[0].message)
+
+    def test_non_string_value_is_unrecognized_too(self):
+        """
+        Given a structured entry whose program_source is a bool
+        When it is normalized
+        Then it is reported the same as any other unrecognized value
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(uv run python *)", PROGRAM_SOURCE_KEY: True},
+            is_native=False,
+        )
+        self.assertIsNone(entry.program_source)
+        self.assertEqual([i.level for i in issues], ["error"])
+
+    def test_absent_key_yields_none_and_no_issues(self):
+        """
+        Given a structured entry with no program_source at all
+        When it is normalized
+        Then there are no issues and the accessor returns None
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(uv run python *)"}, is_native=False
+        )
+        self.assertEqual(issues, ())
+        self.assertIsNone(entry.program_source)
+
+    def test_plain_string_entry_has_no_program_source(self):
+        """
+        Given a plain (unstructured) pattern string
+        When it is normalized
+        Then the accessor returns None, so the common case needs no special casing
+        """
+        entry, issues = normalize_entry("Bash(uv run python *)", is_native=False)
+        self.assertEqual(issues, ())
+        self.assertIsNone(entry.program_source)
+
+    def test_a_deny_rule_may_carry_a_file_guard_with_no_issue(self):
+        """
+        Given a deny-shaped rule whose program_source is 'file'
+        When it is normalized
+        Then it normalizes with no issues -- any list may carry the guard,
+            mirroring auto_mode_behavior's precedent
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(rm -rf *)", PROGRAM_SOURCE_KEY: PROGRAM_SOURCE_FILE},
+            is_native=False,
+        )
+        self.assertEqual(issues, ())
+        self.assertEqual(entry.program_source, PROGRAM_SOURCE_FILE)
+
+    def test_program_source_on_a_read_rule_is_rejected(self):
+        """
+        Given a Read rule carrying program_source='file'
+        When it is normalized
+        Then an error-level issue is reported naming the key and the tool,
+            the rule still applies, and the accessor returns None -- the key
+            has no effect on a file-path tool (Arnon, 2026-09-07 review)
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Read(/tmp/x/**)", PROGRAM_SOURCE_KEY: PROGRAM_SOURCE_FILE},
+            is_native=False,
+        )
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.pattern, "Read(/tmp/x/**)")
+        self.assertIsNone(entry.program_source)
+        self.assertEqual([i.level for i in issues], ["error"])
+        self.assertIn(PROGRAM_SOURCE_KEY, issues[0].message)
+        self.assertIn("Read", issues[0].message)
+
+    def test_program_source_is_rejected_on_every_file_path_tool(self):
+        """
+        Given program_source='file' on a Read, Write, and Edit rule in turn
+        When each is normalized
+        Then each reports the same rejection -- not special-cased to Read
+        """
+        for tool in ("Read", "Write", "Edit"):
+            with self.subTest(tool=tool):
+                entry, issues = normalize_entry(
+                    {
+                        PATTERN_KEY: f"{tool}(/tmp/x/**)",
+                        PROGRAM_SOURCE_KEY: PROGRAM_SOURCE_FILE,
+                    },
+                    is_native=False,
+                )
+                self.assertIsNone(entry.program_source)
+                self.assertEqual([i.level for i in issues], ["error"])
 
 
 if __name__ == "__main__":

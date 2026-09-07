@@ -8,540 +8,307 @@ tags:
 - implementation-report
 ---
 
-# TOO-28 Phase 2 -- two independent auto-mode fallbacks -- implementation report
 
-Brief: `toolguard-memories/TOO-28/brief-phase2.md` (validated, 5/5 slots).
+# TOO-28 Phase 4b+4c: the input-source constraint
 
-## Summary
+Brief: `toolguard-memories/TOO-28/brief-phase4bc.md`, validated `all 5 slots present and filled`.
 
-Added `no_match_fallback_in_auto_mode` and `undecidable_fallback_in_auto_mode`, two
-independently configurable top-level `toolguard_hook` keys that resolve in place of
-`no_match_fallback`/`undecidable_fallback` when Claude Code's own `permission_mode` is its
-auto mode. Unset means "defer to the base setting" (not a fixed literal), so the feature is
-inert until explicitly configured -- proven by corpus equivalence with the new keys unset.
-Ships together with the already-verified `fallback_kind` -> `fallback_outcome` rename that was
-carried in uncommitted from the prior round.
+## Step 1: the resolution rule, and what was wrong in the coordinator's version
 
-## Files touched (this phase; the rename's own 9 files are untouched and carried forward)
+**Implemented rule** (`_input_source_for_executor` in `command_extractor.py`), walking tokens after the executor:
 
-**Source (7):**
-- `toolguard/config_types.py` -- `AUTO_PERMISSION_MODE` constant (config layer, so both the
-  engine and runtime can import it); `permission_mode: Optional[str]` added to
-  `ResolutionContext`; `resolved_no_match_fallback_in_auto_mode`/
-  `resolved_undecidable_fallback_in_auto_mode` added to `ResolutionConfig`/`ResolveConfig`;
-  `UnrecognizedFallbackSetting` gained a `falls_back_to: str = "'ask'"` field so its message
-  can name a non-'ask' fallback for the new keys.
-- `toolguard/config.py` -- the two new `Configuration` resolver methods (each one call to the
-  existing `_resolve_fallback_setting`, `default` set to the dynamically-computed base value);
-  `unrecognized_fallback_settings()` extended to scan the two new keys too, with a
-  `falls_back_to_by_key` map naming the actual base value in each warning.
-- `toolguard/permission_resolution.py` -- `_effective_no_match_fallback(context)` helper,
-  shared by `resolve_command_permission`/`resolve_file_path_permission`, branching on
-  `context.permission_mode == AUTO_PERMISSION_MODE`.
-- `toolguard/resolve.py` -- the same branch, inline, for `undecidable_fallback` in
-  `resolve_bash_permission_detailed` (computed once before the per-unit loop, not per-unit).
-- `toolguard/hook.py` -- `AUTO_PERMISSION_MODE` now imported from `config_types` instead of
-  defined locally (one definition, not two that can drift); the comment above
-  `permission_mode = hook_data.permission_mode` corrected (it used to say "recorded for
-  diagnosis, it never affects the verdict" -- now false, and rewritten).
-- `toolguard/session_start.py` -- the unrecognized-fallback session-start banner no longer
-  asserts a blanket "falls back to 'ask'"; it renders each entry's own `falls_back_to`.
-- `toolguard/tools/takeover_audit.py` -- two new findings, `loose-no-match-fallback-in-auto-mode`
-  (LOW) and `loose-undecidable-fallback-in-auto-mode` (HIGH), firing only when the auto-mode
-  value is both configured (differs from the deferred-to base) and loose -- so an unset auto
-  key never duplicates the existing base-setting finding.
+1. A token starting with `<` (not `<<`, which is a heredoc marker already lifted upstream) -> **file**. Checked FIRST, ahead of everything else.
+2. A token not starting with `-` (or exactly `-`) -> the bare-positional case: **not_file** if `spec.bare_program` (awk: the positional IS the program), else **file** (`python script.py`). `-` alone -> **not_file** (stdin).
+3. A long flag (`--eval`, `--eval=x`) in `inline_long` -> **not_file**.
+4. A bundled short-flag token: an `inline_letters` hit -> **not_file**; a `program_file_letters`/`value_letters` hit steps over its value (shared with `_scan_for_inline_code` via the new `_classify_flag_token` helper) and, for `program_file_letters`, returns **file** immediately.
+5. No positional reached at all -> **not_file** (REPL/stdin).
 
-**Tests (4, all new test classes/methods; no existing test modified):**
-- `test/unit/test_configuration.py` -- `TestResolvedFallbacksInAutoMode` (8 tests: unset
-  defers to base, explicit overrides, unrecognized defers to base not 'ask', alias
-  normalization, independence) and `TestUnrecognizedFallbackSettingsAutoMode` (2 tests, incl.
-  a control proving the base keys' own `falls_back_to` is unchanged).
-- `test/unit/test_permission_resolution.py` -- `TestAskFloorInvariantAcrossFallbackValues`
-  (the step-6 enumerating invariant, over the no_match_fallback value domain) and
-  `TestNoMatchFallbackAutoMode` (4 tests: mode-gating, unset-is-inert, broken-config-still-asks,
-  cross-setting independence).
-- `test/unit/test_resolve.py` -- `TestUndecidableFallbackThreading` gained one enumerating
-  invariant test; new `TestUndecidableFallbackAutoMode` (3 tests, mirroring the no-match side).
-- `test/unit/test_tools_takeover_audit.py` -- `_toolguard_layer` widened via
-  `**top_level_fallback_keys` (PLR0913 forced this over two more named params); new
-  `TestLooseFallbackInAutoMode` (5 tests).
+**Two things were wrong in the coordinator's reading, both found by tracing, not assumed:**
 
-New test count: 4067 (was 4043; +24).
+- **The bash-family coverage gap was real and would have shipped a live bug.** Falling to `_DEFAULT_EXECUTOR_FLAGS` (`inline_letters="cer"`) would classify `bash -e script.sh` as inline, because `-e` is bash's real exit-on-error flag, not an inline-code flag. Fixed with a dedicated `_BASH_FAMILY_FLAGS = _ExecutorFlags(inline_letters=frozenset("c"))`.
+- **The redirect case needed explicit priority over `bare_program`, not just "detection."** `awk < script.awk` would otherwise hit the bare-positional branch and, since `<` doesn't start with `-`, be misread by awk's `bare_program` rule as inline program text. The redirect check runs first.
 
-**Docs (4):**
-- `docs/configuration.md` -- new "Fallback settings in auto mode" section (framed as handoff
-  points, per spec section 2, not "auto-mode variants"); the two keys added (commented, since
-  their real default is absence) to the Configuration reference TOML block; Contents ToC entry.
-- `docs/auto-mode.md` -- the recommended configuration now prefers
-  `no_match_fallback_in_auto_mode` over loosening the base setting globally; the stale
-  "diagnostic only today -- it does not change enforcement" claim about `permission_mode`
-  corrected; checklist items 3/5 rewritten (nothing to remember to tighten back up).
-- `docs/security.md` -- one paragraph added to "Loosening the undecidable fallback" noting the
-  auto-mode counterpart carries the identical risk/mitigation story.
-- `docs/agent-map.md` -- the stale Q&A about the old recommendation corrected; one new Q&A;
-  one new ToC anchor for `configuration.md`'s new section.
+Everything else in the coordinator's reading (inline flag -> not_file, `program_file_letters` -> file, `bare_program`+positional -> not_file, otherwise positional -> file, no positional/`-` -> not_file) was confirmed correct.
 
-## Judgements made, not fully dictated by the brief
+## The five unverified claims -- all checked
 
-1. **`AUTO_PERMISSION_MODE` moved to `config_types.py`, not left in `hook.py`.** The engine
-   layer (`permission_resolution.py`/`resolve.py`) cannot import the runtime layer
-   (`hook.py`) per `.pyscn.toml`; `config_types.py` is already imported by both. `hook.py`'s
-   own local definition (used by the Phase 5 trace gate) now imports the same constant --
-   one definition, not two that could silently drift apart (CLAUDE.md's "literal strings with
-   semantic meaning belong in constants" rule, applied across module boundaries too).
-2. **Design for "unset vs unrecognized"**: rather than changing `_resolve_fallback_setting`'s
-   body (confirmed unnecessary), each new resolver method passes the BASE setting's own
-   resolved value as `_resolve_fallback_setting`'s `default` parameter, computed dynamically
-   per call. Unset and unrecognized therefore both defer to the base value -- the same "safe
-   direction, not the risky one" property the base settings already have (deferring is never
-   the parse-failure-floor-relaxing direction), just with a different concrete fallback target.
-3. **`unrecognized_fallback_settings()` extended, not left alone.** The base settings' typo
-   diagnostic already existed and disambiguates "unset" from "set to garbage" (that
-   distinction is answered there, not inside the resolver -- see Finding 2 below). Extending it
-   to the two new keys, with a corrected non-hardcoded `falls_back_to` message, was the
-   consistent choice; leaving the new keys undiagnosed would have been a silent regression in
-   diagnostic coverage relative to the base settings.
-4. **`takeover_audit.py`'s two new findings fire only when the auto value both differs from
-   AND is looser than the base value** -- not on every configured auto-mode value. Firing
-   unconditionally would duplicate the base finding whenever the auto value merely equals an
-   already-loose base value (the common, boring case); this design surfaces exactly the new
-   information the base findings cannot see (a strict base with a loose auto override) without
-   adding noise to every audit run that touches either setting.
-5. **Genuine RED/GREEN demonstrated by temporary revert, not literal step-ordering.**
-   Implementation and tests were written together rather than test-first; RED was then proven
-   honestly by temporarily reverting the two mode-selection branches (in `resolve.py` and
-   `permission_resolution.py`) and confirming the relevant new tests fail, then restoring and
-   re-confirming green -- pasted in the session transcript. The Configuration-level and
-   takeover_audit-level tests (simple new-method wiring, not branch logic) were not put through
-   this cycle; they passed on first run, which is expected for straightforward new-method tests
-   with no prior behaviour to regress against.
-6. **Markdown line-wrapping**: `docs/configuration.md` and `docs/auto-mode.md` are, in their
-   pre-existing entirety, hard-wrapped at ~90-100 columns throughout (a long-standing local
-   convention, not something I introduced). CLAUDE.md's "never hard-wrap a paragraph" rule is
-   stated as unconditional, so my own new/modified paragraphs in both files (and in
-   `docs/security.md`) were written as single lines regardless of the surrounding file's
-   convention -- flagged here since it makes my additions visually inconsistent with 100% of
-   the surrounding prose, which was a deliberate choice to follow the stated rule rather than
-   local style, not an oversight.
+1. **`value_letters` interaction** -- real, and correctly handled. `python -X foo script.py` classifies as `file` (steps over `foo`); `python -X foo -c "..."` classifies as `not_file` (still finds `-c` after stepping over `-X`'s value). Both are pinned as tests (`test_python_value_letters_flag_is_stepped_over_before_the_positional`, and the not_file mirror).
+2. **No new `_ExecutorFlags` field needed for python/node/perl/ruby/Rscript** -- confirmed. Their existing `bare_program=False` default already triggers the correct "reached a positional -> file" branch with zero changes to those five spec objects. The only new spec is `_BASH_FAMILY_FLAGS`, and that's a coverage gap (bash-family had NO entry before), not new field plumbing.
+3. **`bare_program` means "the first positional is program TEXT"** -- confirmed correct via `_AWK_FLAGS`/`_scan_for_inline_code` tracing.
+4. **Redirect-from-a-file IS detectable at this layer** -- confirmed empirically: `extract_commands()` preserves `<`/redirect syntax verbatim in leaf text. No grammar change needed; this is pure post-parse token interpretation, as scoped.
+5. **"Rule does not apply, continue as though unmatched" is the right semantics, and is consistent with existing behaviour** -- confirmed. The existing no-match branch is `if result is None: continue`; the guard failure is implemented as the same `continue`, at level granularity (see Judgements below).
 
-## Verification performed
+## What was implemented
 
-- Baseline (before any change): `Ran 4043 tests` / `OK (expected failures=4)`; `ruff check .`
-  -> `All checks passed!`.
-- Final: `Ran 4067 tests` / `OK (expected failures=4)`; `ruff check .` -> `All checks passed!`;
-  `ruff format --check .` -> `199 files already formatted`.
-- RED evidence (pasted in transcript): reverting `resolve.py`'s undecidable mode-branch to the
-  base-only call made `TestUndecidableFallbackAutoMode.test_auto_mode_setting_applies_only_under_auto_permission_mode`
-  fail (`'ask' != 'allow'`); reverting `permission_resolution.py`'s
-  `_effective_no_match_fallback` similarly made 2 of
-  `TestNoMatchFallbackAutoMode`'s 4 tests fail. Both reverts undone immediately after.
-- Architecture fitness: `--stdlib` PASS, `--ambient` PASS (82 files, 8 os imports, 40 Path
-  ambient-member reads, all owned), `--layers` PASS (81 modules, completeness and direction
-  both clean).
-- Entry-point smoke test: all 8 console-script modules
-  (`toolguard.hook`, `.session_start`, `.update_check`, `.tools.security_audit`,
-  `.tools.maintenance`, `.tools.installer`, `.scripts.migrate_permissions`,
-  `.tools.update_skills`) imported cleanly.
-- Corpus equivalence (new settings UNSET, proving inertness): `OK: no differences` at
-  `6401`/`61`, both before and after the calibration probe.
-- Calibration: planted `_DEFAULT_NO_MATCH_FALLBACK = "allow"  # TOO-28 PHASE 2 CALIBRATION
-  PROBE` in `config.py`; `--verify` FAILED (pasted diff); reverted; `--verify` passed again;
-  `git status --porcelain -- toolguard/config.py` showed only the legitimate Phase 2 diff (91
-  insertions / 22 deletions), no trace of the probe (`grep -n "CALIBRATION PROBE"` -> no match).
-- Live end-to-end (real `toolguard.hook:main`, piped synthetic `PreToolUse` JSON, scratch
-  project config, cleaned up after): under a config with `no_match_fallback = "deny"` and
-  `no_match_fallback_in_auto_mode = "allow"`, an unmatched command resolved `"allow"` under
-  `permission_mode: "auto"` and `"deny"` under `permission_mode: "default"` -- both pasted in
-  the transcript. Repeated for `undecidable_fallback`/`undecidable_fallback_in_auto_mode`
-  against a foreign-inline-code command (`python3 -c "import os"`): `"allow"` under auto,
-  `"deny"` under default -- also pasted. Confirms `permission_mode` genuinely arrives from the
-  wire payload and reaches the resolver, not just from a mode handed to it directly in a test.
-- `takeover_audit.py`'s two new findings demonstrated directly (not only via unit test) against
-  a hand-built `Configuration`: both fired with the exact rendered description/remediation text
-  pasted in the transcript.
-- Sibling sweep: grepped every production call site of
-  `resolved_no_match_fallback()`/`resolved_undecidable_fallback()` in `toolguard/`; every
-  non-internal call site (`permission_resolution.py`, `resolve.py`, `takeover_audit.py`) is
-  accounted for above; internal call sites (inside the new `_in_auto_mode` methods themselves,
-  and inside the new diagnostic's `falls_back_to` text) are intentional. Checked
-  `toolguard/testing/sandbox.py` and `tools/corpus_build.py`: neither constructs a mode-aware
-  `Invocation` today (sandbox explicitly passes `permission_mode=None`), which is correct,
-  existing, out-of-scope behaviour, not a gap this phase needs to close.
+- `toolguard/constants.py`: `INPUT_SOURCE_FILE = "file"`, `INPUT_SOURCE_NOT_FILE = "not_file"`.
+- `toolguard/parser/command_extractor.py`:
+  - `_BASH_FAMILY_FLAGS`, and five new `_EXECUTOR_FLAGS` entries (bash/sh/dash/ksh/zsh).
+  - `_executor_index` gained `include_bash_family: bool = False` (default preserves `_detect_foreign_inline_code`'s existing behaviour exactly).
+  - `_classify_flag_token` extracted from `_scan_for_inline_code`'s inner loop (proven behaviour-identical by full-suite green at the same 4085-test baseline before any new tests were added).
+  - New `_input_source_for_executor` and public `classify_input_source(cmd_text: str) -> str`.
+- `toolguard/rule_entry.py`: `INPUT_SOURCE_KEY`, `_VALID_INPUT_SOURCE_VALUES`, `RuleEntry.input_source` property, `_input_source_issues` validator, wired into `normalize_entry` and `KNOWN_ENRICHMENT_KEYS` -- exact mirror of `auto_mode_behavior`'s Phase 3 shape.
+- `toolguard/resolve.py`: `_decide` now computes `classify_input_source(sub_command)` and passes it as `resolve_command_permission(..., input_source=...)`.
+- `toolguard/permission_resolution.py`: `command_input_source` threaded through `_resolve_unclamped` -> `resolve_permission_cascade` -> `resolve_command_permission` (NOT `resolve_file_path_permission`). Guard applied right after `winning_entry` is resolved: a mismatch `continue`s the outer level loop.
+- Docs: `docs/configuration.md` new "## Input-source constraint" section (after "Per-rule auto-mode behavior", matching Phase 2/3 placement) plus ToC entry; `docs/agent-map.md` Q&A entry and index entry. `install.md` and bundled skills untouched (TOO-77).
 
-## Findings against the brief's own flagged uncertainties
+## Judgements I acted on that the brief did not specify
 
-- **"That `_resolve_fallback_setting` handles the new keys with no changes"** -- CONFIRMED,
-  zero changes to its body; achieved by passing the dynamically-computed base value as its
-  existing `default` parameter.
-- **"That 'unset means use the base setting' is cleanly expressible... may or may not
-  distinguish unset from unrecognized"** -- the resolver itself does NOT distinguish them (by
-  design, matching the base settings' own behaviour), but a separate diagnostic
-  (`unrecognized_fallback_settings`) already exists for exactly this purpose for the base
-  settings and has been extended to the new ones with a corrected message. This is not a gap;
-  see judgement 2/3 above.
-- **"That adding permission_mode to ResolutionContext is behaviour-neutral by itself"** --
-  CONFIRMED: `Invocation`'s existing `permission_mode: Optional[str] = None` default satisfies
-  the widened Protocol unchanged; full suite green at each step with no test-construction
-  breakage anywhere (many hand-built test doubles pass a bare `Invocation` and never set this
-  field explicitly).
-- **"That takeover_audit only needs a non-auto reading"** -- addressed by adding two NEW
-  findings alongside the existing non-auto ones, rather than changing what the existing two
-  report; the existing two remain a faithful non-auto reading, and the audit doc/module
-  docstring now says explicitly that it reports what the setting WOULD resolve to, not a live
-  read.
-- **"That the two settings are genuinely independent in the code"** -- CONFIRMED by test
-  (`test_no_match_and_undecidable_auto_mode_settings_are_independent` in both
-  `test_permission_resolution.py` and `test_configuration.py`) and by construction: they are
-  resolved by two entirely separate call sites (`permission_resolution.py`'s helper for
-  no-match; `resolve.py`'s inline branch for undecidable), sharing no code path.
+**Level-granularity guard failure, not full per-pattern retry.** `permissions.py`'s `match_command`/`decide_command_at_level_detailed` operate on plain `List[str]` pattern text with no `RuleEntry` association -- there is no cheap way to say "skip this one pattern, try the next in the same list" without restructuring those matching primitives, which is a materially bigger change than this phase authorizes. Implemented instead: a failed guard treats the WHOLE LEVEL as unmatched, falling through the cascade to the next, less-specific level -- structurally identical to the existing `if result is None: continue` branch. Documented in both the code (`_resolve_unclamped`'s docstring) and here. This is the brief's own claim 5, resolved by choosing the option consistent with existing behaviour over one that would need new machinery.
 
-## Self-review notes
+**`input_source` scoped to Bash/MCP-terminal resolution only; `resolve_file_path_permission` never receives it.** A rule mistakenly carrying `input_source` on a file-path list is therefore inert rather than an error -- consistent with how `auto_mode_behavior` is inert on `[hard_deny]`.
 
-- No async/await, no threading, no local imports introduced.
-- All new/changed docstrings state what the setting/method IS, not what this ticket changed.
-- No existing test was modified or deleted; all additions are new test classes/methods, or (in
-  `test_tools_takeover_audit.py`) a widened helper signature that is additive for existing
-  callers (new params/kwarg, all optional, defaulting to prior behaviour).
-- `test/verdict_corpus/` untouched this phase (only read via `--verify`).
-- No git write operations performed.
+## Completion artifacts, per mandated step
 
-## Non-blocking findings for the next round
+| # | artifact |
+|---|---|
+| 2 | RED: `test.unit.test_classify_input_source` written first as a full suite (18 tests); temporarily stubbed `classify_input_source` to always return `not_file` -> **11 of 18 failed** (all 11 `file`-direction cases; all 7 `not_file`-direction cases passed) -- pasted below |
+| 3 | Same run IS the negative-direction proof: the 7 passing `not_file` cases under the always-`not_file` stub show the stub is not a trivial "always pass" -- the guard tests in `test_permission_resolution.py` separately prove this at the rule layer (see below) |
+| 4 | `test_rule_without_input_source_is_unaffected` (in `TestInputSourceGuard`) resolves the same rule under both `'file'` and `'not_file'` classifications and asserts identical `'allow'` both times |
+| 5 | GREEN: full suite `Ran 4119 tests` / `OK (expected failures=4)` (baseline 4085 + 18 classifier + 7 rule_entry + 9 permission_resolution = 4119, exact) |
+| 6 | `test_unrecognized_value_reports_an_error_but_keeps_the_rule` (both `test_rule_entry.py` and mirrored validation path) -- error Issue, rule still normalizes, `entry.input_source` is `None` |
+| 7 | `test_input_source_composes_with_a_{default,regex,glob,native}_pattern`, four tests, all green |
+| 8 | `test_input_source_and_auto_mode_behavior_act_independently` -- one ask rule carrying both keys; `file` command widens to `allow` (auto_mode_behavior fires), `not_file` command's guard fails first so auto_mode_behavior is never consulted and the level falls through to `ask` |
+| 9 | `ruff format --check .` -> `200 files already formatted`; `ruff check .` -> `All checks passed!`; `--stdlib`/`--ambient`/`--layers` all PASS, exit 0 |
+| 10 | `tools/corpus_build.py --verify --strict-prose` -> `OK: no differences` at `6401`/`61` |
+| 11 | Calibration: removed the `winning_entry.input_source is not None` guard clause (leaving only `!=`, so `None != "file"/"not_file"` fires on every Bash match) -> corpus **FAILED hard**, many verdict/reason differences pasted below; reverted; re-ran -> `OK: no differences` again; `git status --porcelain` on all 5 touched production files showed no probe residue |
+| 12 | All 8 entry-point modules imported cleanly |
+| 13 | Live end-to-end, real `toolguard.hook:main`, scratch config with `{ match = "Bash([regex]^uv run python\\b)", input_source = "file" }`: `uv run python script.py` -> `"permissionDecision": "allow"`; `uv run python -c "print(1)"` -> `"permissionDecision": "ask"` (rule did not apply, fell to `no_match_fallback=ask`). Both pasted below |
+| 14 | Sibling sweep below |
 
-- `technical-notes.md` documents the `no_match_fallback`/`undecidable_fallback` asymmetry in
-  depth but was not updated with the two new settings -- in scope only if a future phase wants
-  the deep rationale recorded there too; the brief's docs scope was `docs/` specifically.
-- `toolguard/testing/sandbox.py` has no CLI flag to simulate `permission_mode` for interactive
-  testing of the new settings -- a reasonable usability follow-up, explicitly out of this
-  phase's scope (the brief says "reading permission_mode for anything other than these two
-  settings" is out of scope, and this would be a sandbox feature, not a resolver change).
-  Judgement 5 above.
-- A basic-memory tooling quirk (documented in an earlier round's report too): two physical
-  files in `toolguard-memories/implementation/` were bound to the same permalink
-  (`toolguard/implementation/coder-latest-task-recall`) -- `Coder Latest Task Recall.md`
-  (untouched, committed) and a second one this session renamed to
-  `coder-latest-task-recall-stale-too28-phase2-precursor.md` (git sees this as a delete of the
-  old committed filename plus an add of the new one, though no content was lost -- verified via
-  `git show` against the prior commit). Not resolved; flagged for Arnon to consolidate, since
-  guessing which of the two is authoritative risks destroying the wrong one.
-- `/documentation-review` (the project's own pre-push doc-drift check) was not run this phase;
-  I made a manual, more limited pass (fixing the one stale claim I found in `agent-map.md` and
-  cross-linking the new section) rather than the full skill invocation, since this is a
-  mid-ticket phase, not the pre-push point CLAUDE.md's checklist targets.
-- Before push, still pending per the project's own checklist: version bump in
-  `pyproject.toml`, release notes, `pyscn analyze`, coverage, and the `<TEMPORARY>` fence
-  keep/drop decision in `.claude/toolguard_hook.toml` -- none of these were in this phase's
-  brief and none were touched.
+### RED output (step 2/3, classifier)
 
-
-## Correction round: section 8 invariant, per coordinator review
-
-**Finding accepted as correct.** The original two tests (`test_broken_config_still_asks_despite_allow_no_match_fallback_in_auto_mode` / `..._undecidable_fallback_in_auto_mode`) enumerated *values* for two *named* settings, not settings themselves -- a third fallback-shaped setting added later would pass both untouched. Fixed as directed:
-
-1. **Hoisted the registry.** `Configuration.unrecognized_fallback_settings`'s local `valid_by_key`/`alias_by_key` dicts (plus the ad hoc `falls_back_to_by_key`) are replaced by a module-level `_FallbackSetting` dataclass and a `_FALLBACK_SETTINGS` tuple in `config.py` (four entries: `key`, `valid_values`, `alias_map`, `resolver_method`, `defers_to`, `kind`, `auto_only`). `unrecognized_fallback_settings` now iterates this registry; its `falls_back_to` text is computed generically from `defers_to`/`resolver_method` rather than a hand-listed per-key string. Verified behaviour-identical: `test_configuration`/`test_tools_takeover_audit`/`test_session_start` (305 tests covering this path) all green unchanged.
-2. **New registry-driven test**: `test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting`. Iterates `_FALLBACK_SETTINGS`, and for each setting, each of its valid values, and every `permission_mode` where that setting's value is actually consulted (both modes for a base setting; only `'auto'` for an `auto_only` one -- testing an auto-only setting under the mode where it's never read asserts nothing about it), drives the real command through `resolve_bash_permission_detailed` under a recorded parse failure and asserts the decision floors to `'ask'` (or stays `'deny'`, the already-deny exemption). One test, 24 subTest combinations, zero settings named by string.
-3. **Genuine RED, twice**, both reverted immediately after:
-   - Disabling only `_apply_ask_floor` (the per-sub-command floor) left the test GREEN -- the compound-level second floor at `resolve.py:400` (shared `apply_parse_failure_floor`) covers it independently, confirming the documented "double floor, defense in depth" property empirically rather than assuming it.
-   - Disabling the shared `apply_parse_failure_floor` function itself (used by both call sites) failed **12 of 24** subTests -- every non-`'deny'` value, across all four registered settings. Restored; suite green again.
-4. **Deleted, as subsumed** (all four were tests I added earlier in this same phase, not pre-existing baseline tests):
-   - `test_permission_resolution.TestAskFloorInvariantAcrossFallbackValues` (whole class, one method) -- covered `no_match_fallback` only, default mode only.
-   - `test_permission_resolution.TestNoMatchFallbackAutoMode.test_broken_config_still_asks_despite_allow_no_match_fallback_in_auto_mode` -- one value (`'allow'`), one setting.
-   - `test_resolve.TestUndecidableFallbackThreading.test_ask_floor_holds_across_every_undecidable_fallback_value` -- covered `undecidable_fallback` only, default mode only.
-   - `test_resolve.TestUndecidableFallbackAutoMode.test_broken_config_still_asks_despite_allow_undecidable_fallback_in_auto_mode` -- one value (`'allow'`), one setting.
-   Each is a strict subset of what the registry test now asserts (same command shapes, same floor assertion, superset of values/modes/settings); a one-line pointer comment was left at each deletion site naming the replacement. Nothing else in those classes (mode-gating, unset-inertness, cross-setting independence) was touched.
-5. **Two bugs found and fixed while building the replacement test**, both in the test itself, not production code:
-   - Passing `"permissions": {...}` through `_layer(..., **content)` silently discarded the intended allow rules, since `_layer` always rebuilds `content["permissions"]` from its own `allow=`/`deny=` parameters (defaulting to empty) regardless of anything smuggled in via `**settings`. Fixed by passing `allow=[...]` as a real keyword argument.
-   - My first draft asserted every setting's value under *both* modes uniformly, which is wrong for an `auto_only` setting under the mode where it is never consulted -- the assertion was really testing the (unset) base setting's default, not the setting under test. Fixed by restricting the mode loop per `setting.auto_only`.
-
-Full suite: `Ran 4064 tests` / `OK (expected failures=4)` (4067 -> 4064: -4 deleted methods, +1 new method with 24 subTests). `ruff check`/`format --check` clean. All three architecture-fitness checks pass. Corpus `OK: no differences` at 6401/61, re-calibrated against the registry itself (planted `_DEFAULT_NO_MATCH_FALLBACK = "allow"`, confirmed `--verify` FAILS, reverted, confirmed passes, `git diff --stat` shows only the legitimate registry-refactor diff). All 8 entry points import cleanly.
-
-
-## Correction round: brittle setting-name literals, per Arnon's review
-
-**Accepted.** Each new setting name was typed four times in code, plus `resolver_method`
-(a method name as a string) and `defers_to` (a raw cross-reference to another entry's
-`key=`). Fixed:
-
-1. **Four module-level constants in `config.py`**, public by design (the module docstring's
-   "everything else is underscore-prefixed" note updated to say why these are the exception):
-   `NO_MATCH_FALLBACK_KEY`, `UNDECIDABLE_FALLBACK_KEY`, `NO_MATCH_FALLBACK_IN_AUTO_MODE_KEY`,
-   `UNDECIDABLE_FALLBACK_IN_AUTO_MODE_KEY` -- the base pair included, per instruction. Used
-   for `_FALLBACK_SETTINGS`' `key=`/`defers_to=`, at all four `_resolve_fallback_setting(...)`
-   call sites (the two new methods AND the two original ones), and in the legacy
-   `[takeover_mode].no_match_fallback` alias lookup inside `takeover_mode()` (pre-existing
-   code, touched because it's the same literal and the fix was one line).
-2. **`resolver_method: str` removed entirely**, not just tested-around. `_FallbackSetting`
-   now carries `resolver: Callable[["Configuration"], str]`, bound directly to
-   `Configuration.resolved_no_match_fallback` etc. -- a plain function reference, not a name.
-   This forced moving `_FALLBACK_SETTINGS`'/`_FALLBACK_SETTINGS_BY_KEY`'s construction from
-   before the `Configuration` class to immediately after it (the class must exist for its
-   methods to be referenced as values); the dataclass shape and the four key constants stay
-   near the top with their sibling constants, since method bodies resolve module-level names
-   at call time regardless of file order. A typo'd/renamed resolver method now fails at
-   **import time** (`AttributeError` building the registry) rather than silently at a call
-   site -- confirmed by import smoke test.
-3. **`takeover_audit.py` imports and interpolates the four constants** in every place a
-   setting name appeared in finding/impact/remediation text -- 8 embedded occurrences across
-   the two new findings, more than the coordinator's representative one-per-field citation
-   (their table cited one description + one remediation occurrence per finding; each finding's
-   text actually names the setting 2-3 times, in description, impact, AND remediation, and I
-   fixed all of them). Byte-for-byte message output confirmed unchanged by re-running the same
-   hand-built-`Configuration` demonstration from the prior round and diffing by eye against
-   the earlier transcript -- identical.
-4. **Sweep findings, reported as instructed:**
-   - **The instances I found beyond the coordinator's table, both TOO-28-introduced**: the
-     embedded BASE-setting-name references inside my own new invariant 6/7 text (impact text
-     saying "...no_match_fallback reading above", remediation saying "...defer to
-     no_match_fallback"/"...defer to undecidable_fallback") -- these reference the *base*
-     setting's name, not the auto one the coordinator's table centered on, and there are
-     multiple per finding. All now use the constants.
-   - **Found, left alone (pre-existing, not TOO-28-introduced, matching the project's own
-     decision-value carve-out logic)**: `config.py`'s `_unexpected_key_issues`-style message at
-     the rules-directory validator (`"...governed_tools, no_match_fallback, [takeover_mode]..."`,
-     illustrative prose, not TOO-28's), `hook.py:855` and `tools/security_audit.py:774`
-     (both build a legacy plain-dict/JSON-output view of `TakeoverConfig.no_match_fallback`,
-     predating this ticket), and `takeover_audit.py`'s pre-existing invariant 4/5 message text
-     (I only read the variables those invariants already compute; I did not touch their own
-     wording). None of these are TOO-28's own additions, so none were changed, consistent with
-     the explicit "leave the pre-existing ~60 decision-value comparisons alone" carve-out
-     extended to the same reasoning for pre-existing setting-name literals.
-   - **Deliberately NOT constant-ified**: test-file fixture data and test-assertion literals
-     (e.g. `assertEqual(found[0].key, "no_match_fallback_in_auto_mode")`,
-     `_toolguard_layer(no_match_fallback_in_auto_mode=...)`) -- these are input/expected-value
-     literals in the existing project convention (hundreds of pre-existing
-     `assertEqual(..., "ask")`-style test assertions follow the same pattern), not
-     "a conditional, comparison, or dispatch" in shipped production code.
-
-Verification: suite `Ran 4064 tests` / `OK (expected failures=4)` (unchanged, no tests
-added, per the constraint); `ruff check`/`format --check` clean; all three architecture-fitness
-checks pass; all 8 entry points import cleanly; corpus `OK: no differences` at 6401/61,
-calibrated twice more this round -- once via the pre-existing `_DEFAULT_NO_MATCH_FALLBACK`
-probe (confirmed sensitive to `config.py` generally) and once by deliberately mistyping
-`NO_MATCH_FALLBACK_KEY` itself (confirmed `--verify` FAILS on this repo's own
-`no_match_fallback = "allow_with_no_warnings"` setting silently stopping being read, reverted,
-confirmed passes again, `git status --porcelain` clean of any probe residue).
-
-
-## New task: decision-value literals -> constants (allow/deny/ask sweep)
-
-Arnon overruled the earlier deferral: pre-existing `== "allow"`/`"deny"`/`"ask"` comparisons
-are now in scope, project-wide, not just TOO-28-introduced ones.
-
-**Re-measured myself** (instructed to, since the coordinator's own scans had been wrong
-twice): grepped every production `.py` file for the three vocabularies, then read each hit's
-context individually to classify decision vs. collision -- see below.
-
-### Constants added, `toolguard/constants.py`
-
-```python
-DECISION_ALLOW = "allow"
-DECISION_DENY = "deny"
-DECISION_ASK = "ask"
-FALLBACK_ALLOW_WITH_WARNING = "allow_with_warning"
-FALLBACK_ALLOW_WITH_NO_WARNINGS = "allow_with_no_warnings"
-FALLBACK_OUTCOME_WARNED = "warned"
-FALLBACK_OUTCOME_SILENT = "silent"
-FALLBACK_OUTCOME_DENIED = "denied"
+```
+FAIL: test_awk_program_file_flag_is_a_file ... AssertionError: 'not_file' != 'file'
+FAIL: test_awk_redirected_from_a_file_is_a_file ... AssertionError: 'not_file' != 'file'
+FAIL: test_bash_dash_e_is_a_file_not_inline ... AssertionError: 'not_file' != 'file'
+FAIL: test_bash_positional_script_is_a_file ... AssertionError: 'not_file' != 'file'
+FAIL: test_node_positional_script_is_a_file ... AssertionError: 'not_file' != 'file'
+FAIL: test_perl_positional_script_is_a_file ... AssertionError: 'not_file' != 'file'
+FAIL: test_php_program_file_flag_is_a_file ... AssertionError: 'not_file' != 'file'
+FAIL: test_python_positional_script_is_a_file ... AssertionError: 'not_file' != 'file'
+FAIL: test_python_value_letters_flag_is_stepped_over_before_the_positional ... AssertionError: 'not_file' != 'file'
+FAIL: test_rscript_positional_script_is_a_file ... AssertionError: 'not_file' != 'file'
+FAIL: test_ruby_positional_script_is_a_file ... AssertionError: 'not_file' != 'file'
+----------------------------------------------------------------------
+Ran 18 tests in 0.002s
+FAILED (failures=11)
 ```
 
-`DECISION_*` used for both the decision vocabulary and the fallback-setting values that
-share the exact spelling (a fallback setting resolving to `'ask'` literally means the
-resolver returns the decision `'ask'`) -- `FALLBACK_ALLOW_WITH_WARNING`/`_NO_WARNINGS` cover
-the two fallback-setting-only spellings that have no decision equivalent, per the brief's
-own split. `STATUS_*` untouched.
+### RED output (step 3, guard negative direction, `permission_resolution.py`)
 
-### Files converted (16, this round)
+Guard clause temporarily removed entirely from `_resolve_unclamped`:
 
-`compound.py`, `permission_resolution.py`, `resolve.py`, `hook.py`, `file_matching.py`,
-`permissions.py`, `config.py` (including its own `_DEFAULT_NO_MATCH_FALLBACK`/
-`_VALID_*_FALLBACKS`/`_ALLOW_NO_WARNINGS_ALIAS`/`_ACCEPTED_FALLBACK_SPELLINGS` constants, and
-the `"warn_deny"` alias-map value), `tools/self_permission.py`, `tools/mining.py`,
-`tools/replay.py`, `tools/uninstall_readiness.py`, `tools/consolidate.py`,
-`tools/takeover_audit.py` (including its PRE-EXISTING invariant 4/5 wording this time --
-that carve-out was specific to the prior round's setting-*name* work, not this round's
-decision-*value* scope, which the coordinator explicitly widened), `tools/installer.py`
-(the `--no-match-fallback` argparse `choices=`/`default=`). `test/unit/test_architecture.py`
-updated (three exact per-module import allow-lists -- `permissions`, `file_matching`,
-`permission_resolution` -- each gained `"toolguard.constants"`, matching the new import each
-module needed; module docstrings updated to match).
+```
+FAIL: test_file_required_rule_does_not_fire_on_inline_code ... AssertionError: 'allow' != 'ask'
+FAIL: test_input_source_and_auto_mode_behavior_act_independently ... AssertionError: 'allow' != 'ask'
+FAIL: test_not_file_required_rule_does_not_fire_on_a_file ... AssertionError: 'allow' != 'ask'
+----------------------------------------------------------------------
+Ran 9 tests in 0.002s
+FAILED (failures=3)
+```
 
-Two catches from my own re-measurement, not in the coordinator's list:
-1. `permissions.py`'s `check_permission`/`resolve_allow_ask` return bare
-   `("allow"|"deny"|"ask", reason)` tuples -- missed by a `decision="..."`-shaped grep, since
-   these are bare returns, not keyword construction.
-2. `tools/installer.py`'s `--no-match-fallback` CLI flag: `choices=(...)` and `default=` were
-   a second, literal copy of `_VALID_NO_MATCH_FALLBACKS`' value set, outside `config.py`
-   entirely.
+(The composition/positive tests in the same class stayed green under the missing guard -- exactly the "a guard that always passes satisfies every positive case" failure mode the brief named, confirming these 3 are the tests that give the others meaning.)
 
-### Deliberately NOT converted -- vocabulary collisions (same spelling, different meaning)
+### Calibration FAIL excerpt (step 11)
 
-- **`list_type`** (`self_permission.py`, `danger.py`, `consolidate.py`, `uninstall_readiness.py`,
-  `rule_apply.py`, `hierarchy.py`, `installer.py`'s candidate tuples): "which permissions
-  LIST a rule belongs in" -- structurally the same thing as `permissions.allow`/`.deny`/`.ask`
-  as config keys, not a decision.
-- **`permissions.get("allow"/"deny"/"ask", ...)`** and every `for perm_type in ("allow",
-  "deny", "ask")`-shaped iteration** across `config.py`, `config_divergence.py`,
-  `config_validation.py`, `config_write_guard.py`, `permission_migration.py`, `rule_sort.py`,
-  `toml_scan.py`, `tools/config_access.py`, `tools/annotate.py`, `tools/redundancy.py`,
-  `tools/rule_apply.py`, `tools/security_audit.py`, `tools/maintenance.py`,
-  `tools/takeover_audit.py` (its own two `permissions.get("allow", [])` reads) -- the
-  permissions-SECTION-name vocabulary, exactly the coordinator's own named example. By far
-  the largest category of hits the raw grep produced; none converted.
-- **`tools/clarity.py`**'s `section`/`"deny-shadows-allow"`/`by_section[...]` -- same
-  permissions-section vocabulary, one further step removed (labels a conflict's section, not
-  a decision); one value it uses (`"deny+ask"`) isn't even a valid decision, confirming it.
-- **`hook.py`'s `LogRecord.status`** (`"executed"`/`"refused"`/`"ask"`): a genuinely
-  DIFFERENT, THIRD vocabulary from `RuntimeVerdict.decision` -- `LogRecord`'s own docstring
-  states this explicitly ("Deliberately not the same shape as RuntimeVerdict"). `status="ask"`
-  coincidentally shares a spelling with `DECISION_ASK` but means something else; left as a
-  literal, with a one-line comment at the site explaining why (this is exactly the "STATUS_*
-  vs decisions" hazard the brief itself named, just at a spelling the brief didn't call out).
-- **`compound.py`/`resolve.py`/config.py's `fallback_cause`** (`"no_match"`/`"undecidable"`):
-  a fourth, separate vocabulary (added TOO-28), not one of the three the brief listed. Left
-  as literals -- reported here rather than swept in.
+```
+[pattern_forms] Bash('git push origin main').permissionDecisionReason:
+    expected: 'Compound command contains denied sub-command: ... deny pattern: [regex]^git\s+push\b ...'
+    actual  : 'Compound command contains sub-command requiring approval: ... (no_match_fallback=ask)'
+[pattern_forms] Bash('git status').permissionDecisionReason:
+    expected: 'Command matches allow pattern: git status ...'
+    actual  : '... requiring approval: git status (no_match_fallback=ask)'
+[realistic] Bash('gh status') / Bash('git status'): similar -- every previously-matched Bash rule in the corpus stopped matching.
+FAIL: hard verdict/output/data-integrity differences found.
+```
 
-### Judgement call: `config_types.py` left unconverted (2 sites)
+### Live end-to-end (step 13)
 
-`_entries_for_kind`'s `kind == "allow"`/`kind == "ask"` ARE genuine decision comparisons
-(`kind` is fed `decision` at the one real call site in `permission_resolution.py`). Not
-converted: `config_types.py`'s own docstring and `test_architecture.py`'s exact allow-list
-both declare it imports ONLY `toolguard.rule_entry` -- the tightest, most literally-enforced
-boundary in the codebase (a leaf explicitly forbidden from importing back into `config`).
-Loosening it for two comparisons felt like a disproportionate architecture change to make
-inside a literal-sweep task; flagging for a explicit decision rather than doing it silently.
+```
+$ echo '{...,"tool_input":{"command":"uv run python script.py"},...}' | uv run python -m toolguard.hook
+{"hookSpecificOutput": {"permissionDecision": "allow", "permissionDecisionReason": "Command matches allow pattern: [regex]^uv run python\\b  [project: .../toolguard_hook.toml]"}}
 
-### Also considered and left as prose (not converted)
+$ echo '{...,"tool_input":{"command":"uv run python -c \"print(1)\""},...}' | uv run python -m toolguard.hook
+{"hookSpecificOutput": {"permissionDecision": "ask", "permissionDecisionReason": "Command does not match any allow patterns; awaiting a decision (no_match_fallback=ask)"}}
+```
 
-`tools/installer.py`'s `_ENABLE_TAKEOVER_HELP` (a multi-paragraph CLI `--help` text block
-that also names `"ask"`/`"allow"`/`"deny"`/`"allow_with_no_warnings"`) -- read as descriptive
-documentation for a human, the same category as a docstring, not a compared/dispatched value.
+## Sibling sweep
+
+- **`resolve_file_path_permission` (Read/Write/Edit)** -- deliberately excluded per brief scope; `input_source` is inert there by construction (parameter defaults `None`, `winning_entry.input_source` is also always `None` for any real file-path rule, so the guard never fires either way for that path).
+- **`[hard_deny]`** -- `Configuration.hard_deny()` never exposes entry metadata at all, so `input_source` on a hard_deny entry is inert, identically to `auto_mode_behavior`'s Phase 3 precedent. Not a new gap; consistent with existing design.
+- **MCP-terminal tool resolution** -- already covered. `resolve.py`'s `_decide` closure is shared by both native Bash sub-commands and MCP terminal-tool commands (per its own docstring: "regardless of the invoking tool's own name"), and `resolve_command_permission` has exactly one production call site, inside `_decide`. No separate path needed a wire-up.
+- **No other consumer found.** `grep`-level check of `resolve_command_permission(` call sites confirmed a single production caller.
+
+## Baseline vs. final
+
+Baseline (start of phase): `Ran 4085 tests` / OK; corpus 6401/61 OK; 3 fitness checks; 8 entry points.
+Final: `Ran 4119 tests` / OK (expected failures=4); ruff clean; corpus 6401/61 OK, calibrated; 3 fitness checks PASS; 8 entry points load; `test.unit.test_architecture` 27/27.
+
+## Self-review
+
+- Anti-pattern scan: no async/await, no threading, no local imports introduced.
+- No grammar changes -- confirmed throughout; this was pure post-parse token interpretation, exactly as scoped. Never hit a point requiring `.peg`/canopy changes.
+- Existing-test modification: one canary test (`test_known_enrichment_keys_holds_...`) in `test_rule_entry.py` asserted `KNOWN_ENRICHMENT_KEYS`'s exact membership and had to be updated to include the new key -- explicitly authorized by the brief ("membership in KNOWN_ENRICHMENT_KEYS," following the Phase 3 precedent, whose own addition is what put `auto_mode_behavior` in that same test's docstring). No other existing test was touched; no test was weakened.
+- `docs/agent-map.md`/`docs/configuration.md` updated in the same edit as the code they describe, per the doc-drift sweep habit.
+
+## Time / cost estimate (this phase's continuation only -- prior phases already reported separately)
+
+Rough breakdown for this session's portion (investigation was completed and reported before this continuation began per the prior summary):
+
+- Implementation (classifier, rule_entry, resolve.py, permission_resolution.py wiring): ~20 min
+- TDD (writing tests, RED/GREEN cycles for classifier and guard): ~15 min
+- Verification (lint, fitness checks, corpus + calibration, entry points, live e2e): ~15 min
+- Documentation + sibling sweep + report: ~10 min
+
+Total this continuation: roughly 60 minutes of tool-call time. Estimated cost at Sonnet rates for a session of this token volume: low single-digit USD (a few dollars), consistent with prior phases in this same ticket.
+
+
+## Correction round: two defects found by the coordinator's review (2026-09-07)
+
+**Both accepted and fixed.** The coordinator measured live against the shipped code; I had not tested the file-path case at all, and my report's "silently inert" claim was wrong -- it was an untested assumption, exactly the kind this project's rules warn against.
+
+### 1. `input_source` on a file-path rule broke matching -- allow went dark, deny failed open
+
+**Root cause, traced (not assumed):** `_resolve_unclamped`'s guard ran unconditionally: `winning_entry.input_source != command_input_source`. `resolve_file_path_permission` never threads a classification, so `command_input_source` stays `None` there -- and `"file" != None` is `True`, so ANY rule declaring `input_source` on a Read/Write/Edit pattern had its level treated as unmatched, regardless of the pattern itself. An allow rule stopped matching (silent narrowing); a deny rule stopped matching too (fail-open -- the more serious direction).
+
+**Fix, two layers:**
+- `_resolve_unclamped`'s guard now also requires `command_input_source is not None` -- a resolution that never classified anything (every file-path call) makes the guard a structural no-op, not a mismatch.
+- `RuleEntry.input_source` (the single accessor) now ALSO returns `None` when the pattern's tool is in `FILE_TOOLS`, independent of the resolver-side fix -- defense in depth, and it is what makes the config-time rejection below actually correspond to what the rule does.
+- New config-time validation (`_input_source_issues`): `input_source` on a `Read(...)`/`Write(...)`/`Edit(...)` pattern is now an `error`-level Issue naming the key and the tool, rejecting the whole key outright rather than accepting it silently-and-inert -- matching the "loud config issue, never a quiet change" instruction.
+
+**RED/GREEN evidence**, `test.unit.test_permission_resolution.TestInputSourceGuardNeverAppliesToFilePathResolution` and `test.unit.test_rule_entry.TestInputSource.{test_input_source_on_a_read_rule_is_rejected,test_input_source_is_rejected_on_every_file_path_tool}`:
+- RED (resolver bug, before the `is not None` fix): allow test `AssertionError: 'ask' != 'allow'`; deny test `AssertionError: 'ask' != 'deny'` (in-process default `no_match_fallback` differs from the coordinator's live scratch config, which showed `allow` -- same underlying defect either way: the deny simply never fires).
+- RED (validation, before the FILE_TOOLS check): `AssertionError: 'file' is not None` x4 (Read/Write/Edit x2 test methods).
+- GREEN after both fixes: `Ran 92 tests` (test_rule_entry.py) / `Ran 37 tests` (test_permission_resolution.py), both OK.
+
+**Live end-to-end, both directions, real hook, post-fix:**
+```
+allow = [ { match = "Read(<target>/**)", input_source = "file" } ]
+  [ERROR] 'input_source' has no effect ... 'Read' is a file-path tool ...
+  Read <target>/f.txt -> permissionDecision: allow  (rule still matches correctly)
+
+deny = [ { match = "Read(<target>/f.txt)", input_source = "file" } ]
+  [ERROR] 'input_source' has no effect ...
+  Read <target>/f.txt -> permissionDecision: deny  (rule still fires correctly)
+```
+Both the loud diagnostic and the correct underlying decision are present in both directions.
+
+Corpus/fitness/entry-points re-run clean after the fix (`Ran 4124 tests` / OK; ruff clean; 3 fitness PASS; corpus `OK: no differences` at 6401/61; 8 entry points). Corpus-level calibration was not repeated for this specific narrowing condition -- no corpus config declares `input_source` on a file-path rule, so a corpus probe would show nothing regardless of correctness; the two dedicated RED/GREEN unit-test cycles above are the calibration evidence for this fix.
+
+### 2. Level-granularity guard can suppress a sibling deny in the same list -- CONFIRMED, pinned, not fixed (as instructed)
+
+Traced `match_command`: it returns the FIRST matching pattern in list order and never examines the rest. So `deny = [{match="Bash(python *)", input_source="file"}, "Bash(python -c *)"]` resolving `python -c "x"` under `not_file`: `match_command` returns the first pattern (the guarded one) as the level's match; its guard fails; `continue` discards the WHOLE level; the second, unguarded, also-matching pattern is never reached, because `match_command` already returned before ever considering it.
+
+Pinned with `test.unit.test_permission_resolution.TestInputSourceGuardWithinLevelPrecedence.test_a_failing_guard_on_the_first_matching_deny_suppresses_a_sibling_deny` -- asserts the ACTUAL (undesired but documented) behavior: the command falls through to `no_match_fallback` ('ask') instead of being denied. This test PASSED on first run against the unmodified code, confirming the coordinator's reading was correct and needed no resolution-layer change.
+
+Per instruction, **no restructuring of `permissions.py`**. The guard's comment in `_resolve_unclamped` now states plainly: *"including a sibling pattern in the SAME list that would also have matched: match_command returns only the first matching pattern and never tries the rest."* `docs/configuration.md`'s Input-source constraint section gained the same warning, with the practical mitigation (order the unguarded/broader rule first).
+
+### Final state after the correction round
+
+`Ran 4124 tests` / `OK (expected failures=4)`; `ruff format --check .` -> `200 files already formatted`; `ruff check .` -> `All checks passed!`; `--stdlib`/`--ambient`/`--layers` all PASS; `test.unit.test_architecture` 27/27; corpus `tools/corpus_build.py --verify --strict-prose` -> `OK: no differences` at 6401/61; 8 entry points import cleanly; live end-to-end re-confirmed for both the original Bash scenario and both new file-path scenarios (allow and deny).
+
+Files touched this round (subset of the phase's file list, no new files beyond the earlier `test/unit/test_classify_input_source.py`): `toolguard/permission_resolution.py`, `toolguard/rule_entry.py`, `test/unit/test_permission_resolution.py`, `test/unit/test_rule_entry.py`, `docs/configuration.md`, `docs/agent-map.md`.
+
+
+## Escalation round 2: match semantics rewritten -- pre-match filtering/bucketing replaces post-match guard/rewrite (2026-09-07)
+
+**Accepted in full, including the mid-round extension applying the same defect class to `auto_mode_behavior`.** Both keys share one root cause: treating a guard/behavior as something applied AFTER a plain-pattern match conflates "the pattern text matched" with "the rule matched" -- they are the same thing only when a rule carries no enrichment that can move or veto it. Arnon, 2026-09-07: *"a rule match should be considered on the whole rule, not just the pattern match."*
+
+### The redesign
+
+**Filtering and effective-grouping now happen BEFORE `decide_command_at_level_detailed`/`decide_file_path_at_level_detailed` are even called**, per level, in a new `_level_pattern_buckets()` (`permission_resolution.py`):
+
+- An entry whose `input_source` guard fails for the command's classification (or whose classification is unavailable, e.g. file-path resolution) is dropped -- never offered to the matcher, so it cannot win, and therefore cannot suppress a sibling pattern in the same list. Pattern ORDER stops mattering.
+- Under `permission_mode=auto`, an entry declaring `auto_mode_behavior` is bucketed by that EFFECTIVE decision rather than the list it is actually written in (its ACTUAL/real group) -- so deny-first precedence and more-specific-wins now apply to what a rule genuinely DOES, not to which list happened to hold it.
+
+The post-match `continue`-on-guard-failure and the post-match auto-mode decision REWRITE are both **deleted** from `_resolve_unclamped`. `permission_mode`/`command_input_source` are no longer parameters of `_resolve_unclamped`/`resolve_permission_cascade` at all -- dead once filtering/bucketing moved upstream.
+
+### Provenance: decision and group are no longer the same thing
+
+Arnon, 2026-09-07: *"we just need to be careful about provenance... the provenance of the rule is still in the actual group it resides in."* `LevelMatch` gained a new field, `matched_entry_kind: Optional[str] = None` -- the rule's ACTUAL list, set only by `resolve_command_permission`/`resolve_file_path_permission` (the only code that knows which entry produced a given matched pattern, via the bucketing index), left `None` by `permissions.py`/`file_matching.py`'s own unmodified constructors (so **`permissions.py` was never touched**, per the standing scope constraint) and by any hand-built `LevelMatch` in existing tests.
+
+`_matched_rule_lookup`/`_detect_override` now key `provenance_for_pattern`/`entry_for_pattern` off a new `_real_group(result)` helper (`matched_entry_kind` if set, else `decision` -- backward compatible with every hand-built `LevelMatch` in `test_configuration.py`'s cascade tests). **Self-discovered and fixed**: `_detect_override`'s own less-specific-level lookup had the identical ordering-trap bug (hardcoded `DECISION_DENY` as the search kind), not explicitly asked for but fixed in the same pass and pinned with a new test (`test_override_provenance_names_the_overridden_rules_real_list_when_it_too_migrated`).
+
+The reason text: since bucketing means the base match genuinely happens in the EFFECTIVE group, `decide_command_at_level_detailed`'s own reason ("matches allow/deny/ask pattern: ...") is now correct BY CONSTRUCTION and needed no rewrite. `_resolve_unclamped` appends Phase 3's original suffix (`-- auto_mode_behavior='X' applied (permission_mode=auto)`) exactly when `matched_entry_kind != decision`, so a reader sees both the rule that matched and that a migration happened. Live-verified: `"Command matches allow pattern: rm -rf *  [...] -- auto_mode_behavior='allow' applied (permission_mode=auto)"` -- coherent, never contradictory.
+
+### The exact reported bug, fixed and reproduced live, both directions
+
+```toml
+no_match_fallback = "allow"
+[permissions]
+deny = [
+    { match = "Bash(mycmd *)", auto_mode_behavior = "allow" },
+    "Bash(mycmd --dangerous*)",
+]
+```
+`mycmd --dangerous now`:
+- `permission_mode=default` -> `deny`, reason names `mycmd *` (real deny, migration inert outside auto mode)
+- `permission_mode=auto` -> **now `deny`** (previously `allow`), reason names `mycmd --dangerous*` -- the migrated rule moved out of the deny bucket, so the unguarded sibling deny wins deny-first precedence, exactly as intended.
+
+And the `input_source` case from round 1, re-verified unaffected by this rewrite: `deny = [{match="Bash(python *)", input_source="not_file"}, "Bash(python /tmp/danger.py)"]` resolving `python /tmp/danger.py` (classified `file`) -> **`deny` in BOTH pattern orderings** (previously `allow`/fell through to a less-specific level in the guarded-first ordering). Pinned in `TestInputSourceGuardIsOrderIndependent`, which replaces the round-1 class that had pinned the bug as a documented limitation.
+
+### A genuine, unrelated test-fixture gap surfaced and fixed
+
+`test_hook.py`'s `_fake_config` stand-in `Configuration` returned bare pattern-string tuples with `layers=()` (never built real `ToolPatternLayer`/`RuleEntry` objects) -- the OLD code path worked fine with this shape since it matched directly against the flat string tuples; the new entry-based bucketing needs real entries and silently saw nothing there, failing 7 previously-unrelated `test_hook.py` tests (ordinary allow patterns with no enrichment keys at all resolving to `ask` instead of `allow`). Fixed by having the fixture build a genuine `ToolPatternLayer` with plain `RuleEntry(pattern=p)` objects (no metadata, so `.input_source`/`.auto_mode_behavior` are both `None` and every existing test's behavior is unchanged) instead of an empty-layers tuple. This is a fixture/helper adaptation required by the authorized refactor, not a weakening of any assertion.
+
+### Tests added/changed this round
+
+- `TestInputSourceGuardIsOrderIndependent` (replaces the round-1 "pinned limitation" class): both pattern orderings deny for the exact reported case; the guarded pattern still wins when its own condition IS met.
+- `TestPerRuleAutoModeBehavior`: `test_allow_migrated_to_deny_wins_deny_first_precedence_over_a_matching_ask` (the exact reported scenario, unit-level), `test_provenance_and_additional_context_survive_narrowing_to_deny` (mirror of the existing deny-widened-to-allow test), `test_reason_names_the_actual_rule_and_states_the_behavior_applied`, `test_override_provenance_names_the_overridden_rules_real_list_when_it_too_migrated` (self-discovered `_detect_override` fix).
+- `test_hook.py`: fixture fix only, no test assertions changed.
+
+RED confirmed for the whole `TestPerRuleAutoModeBehavior` class (10/11 failed) by temporarily disabling `_effective_kind`'s migration; RED confirmed separately for the override-provenance test by reverting `_detect_override`'s lookup to hardcoded `DECISION_DENY`. Both reverts restored cleanly (`git status --porcelain` clean of probe residue).
+
+### Final verification, this round
+
+`Ran 4129 tests` / `OK (expected failures=4)`; `ruff format --check .` -> `200 files already formatted`; `ruff check .` -> `All checks passed!`; `test.unit.test_architecture` 27/27; 3 fitness checks PASS; corpus `tools/corpus_build.py --verify --strict-prose` -> `OK: no differences` at 6401/61, calibrated by forcing the allow bucket permanently empty in `_level_pattern_buckets` (hard corpus FAIL across nearly every allow-matched case), reverted, re-confirmed passing, `git status --porcelain` clean; 8 entry points import cleanly; live end-to-end re-verified for both `input_source` (Bash and the Read allow/deny file-path cases from round 1) and `auto_mode_behavior` (the exact reported scenario, both permission modes, plus the annotated-reason case).
+
+### Documentation corrected
+
+`docs/configuration.md`'s Input-source section previously (this round's OWN round-1 correction) documented the suppression as a real limitation with "order the unguarded rule first" advice -- removed per instruction, replaced with the correct semantics (a rule whose guard fails did not match, order-independent). Its auto-mode-behavior section gained a new paragraph on precedence-by-effective-group. `docs/agent-map.md`'s matching Q&A entry updated the same way.
+
+
+## Final correction: reason text names the real group, not the effective one (2026-09-07)
+
+**Accepted.** The wording choice flagged as ambiguous in round 2 was resolved the other way: the BASE clause must name the rule's REAL list ("matches ask pattern"), and the suffix states the effective decision separately -- not the reverse. Arnon: *"the provenance of the rule is still in the actual group it resides in"* -- the sentence a human reads must say so too, not just the `Provenance` object.
+
+### Root cause and fix
+
+`permissions.py`/`file_matching.py` (both untouched, per scope) build the base reason as the literal `f"Command/Path matches {decision} pattern: {pattern}"`, where `decision` is the EFFECTIVE group -- correct as far as those modules know, since that genuinely is the bucket the pattern matched from after TOO-28's pre-match bucketing. New `_reason_naming_real_group()` in `permission_resolution.py` renames that one known literal clause to the REAL group (`_real_group(result)`) whenever it differs, applied before `_append_provenance`. Deliberately a single, exact, known-literal `str.replace(..., count=1)` rather than general parsing -- the literal template was read directly from both source files, not guessed, and the alternative (reconstructing the whole message from scratch) would duplicate the two format strings this module doesn't own.
+
+### Verified: only the prose was wrong, not the data
+
+Explicit check, per instruction: `matched_rule`, `provenance.path`, `provenance.level`, and `decision` on the `RuntimeVerdict` were already correct before this fix (confirmed by a direct probe showing identical values pre- and post-fix) -- `_matched_rule_lookup`'s round-2 fix (keying off `_real_group`) already made the structured `Provenance` object right. `LogRecord` (`log_writer.py`) carries no free-text `reason` field at all, only `matched_rule` (pattern text, group-word-free) and other structured fields -- confirmed by grep, no other prose-composition site exists.
+
+### Tests
+
+Renamed/split the round-2 reason test into two, one per direction, each asserting BOTH that the correct group's word is present and the WRONG one is absent (`assertNotIn`): `test_reason_names_the_rules_real_list_not_its_effective_one` (deny rule widened to allow -- reason says "matches deny pattern") and `test_reason_names_the_real_list_in_the_narrowing_direction_too` (allow rule narrowed to deny -- reason says "matches allow pattern"). RED confirmed by temporarily reverting to `result.reason` unrewritten (both tests failed, reproducing the exact reported wording:` "Command matches allow pattern: rm -rf *  [...] -- auto_mode_behavior='allow' applied"` for a rule actually in the deny list); reverted, GREEN confirmed.
+
+Live end-to-end, both directions, real hook: ask-list rule widened to allow under auto -> `"Command matches ask pattern: some-guarded-cmd*  [...] -- auto_mode_behavior='allow' applied (permission_mode=auto)"`; allow-list rule narrowed to deny under auto -> `"...Command matches allow pattern: mycmd *  [...] -- auto_mode_behavior='deny' applied (permission_mode=auto))"`. Both base clauses name the rule's real list; both suffixes separately state what moved it.
+
+### Final verification, this round
+
+`Ran 4130 tests` / `OK (expected failures=4)`; `ruff format .` -> `200 files left unchanged`; `ruff check .` -> `All checks passed!`; 3 fitness checks PASS; corpus `OK: no differences` at 6401/61 (no corpus rule carries `auto_mode_behavior`, so this prose-only fix is invisible to a decision-diff corpus check by construction -- the RED/GREEN unit-test cycle is the correct instrument here, and is what was used); 8 entry points import cleanly.
+
+**Phase complete.** All three rounds (initial implementation, the two file-path/precedence bugs, and this wording correction) are in a single coherent final state.
+
+
+## Final rename: `input_source` -> `program_source` (2026-09-07)
+
+**Pure rename, no behavior change**, per Arnon's decision: `input_source` was ambiguous (`python script.py < data.txt` has an obvious "input source" that is not the program) and `program_source` reuses the module's own established vocabulary (`_ExecutorFlags.program_file_letters`/`bare_program`).
+
+### Scope
+
+Mechanical three-pass rename (`INPUT_SOURCE`->`PROGRAM_SOURCE`, `input_source`->`program_source`, `InputSource`->`ProgramSource`) across all 11 files that had any occurrence: `toolguard/constants.py`, `toolguard/rule_entry.py`, `toolguard/permission_resolution.py`, `toolguard/parser/command_extractor.py`, `toolguard/resolve.py`, `test/unit/test_hook.py`, `test/unit/test_permission_resolution.py`, `test/unit/test_rule_entry.py`, `test/unit/test_classify_input_source.py` (renamed to `test_classify_program_source.py`), `docs/configuration.md`, `docs/agent-map.md`. The renamed test file's own class/method names, module docstring, and every `Given/When/Then` docstring changed too, since a stale test description is worse than none.
+
+**Also caught and fixed, found by a follow-up hyphenated-prose grep the underscore-based sed couldn't reach**: `toolguard/auto_mode_trace.py`'s comment ("needs the input-source constraint" -- a file not in the original 11, found by searching "input-source"/"input source" separately from the underscore form), the renamed test file's own opening docstring line ("Tests for the input-source classifier"), `rule_entry.py`'s error message text ("input-source guard will be ignored"), and both `docs/configuration.md`'s/`docs/agent-map.md`'s markdown heading (`## Input-source constraint` -> `## Program-source constraint`) and every anchor link pointing at it. `grep -rni "input.source"` repo-wide (excluding `.git` and memory notes) now returns nothing.
+
+**Also fixed while here**: `RuleEntry.program_source`'s docstring still described ROUND 1's removed mechanism (`resolve_permission_cascade`'s `command_input_source is not None` check as "a second, independent line of defense") -- stale since escalation round 2 deleted that check entirely. Corrected to describe the actual current mechanism: the accessor is what `_level_pattern_buckets`'s pre-match filtering reads.
 
 ### Verification
 
-- Suite: `Ran 4064 tests` / `OK (expected failures=4)` -- unchanged, no tests added (none
-  needed: every conversion is a same-value literal-to-name swap with no new branch).
-- `ruff check .` / `ruff format --check .`: clean.
-- `test.unit.test_architecture`: 27/27, confirming the three updated exact import allow-lists
-  match the real imports and stay a tightening of `.pyscn.toml`.
-- Three fitness checks (`--stdlib`/`--ambient`/`--layers`): PASS.
-- Corpus: `tools/corpus_build.py --verify --strict-prose` -> `OK: no differences` at
-  `6401`/`61`.
-- Calibration (the stronger form, as instructed): mistyped `DECISION_ALLOW`'s VALUE to
-  `"allow_TOO28_CALIBRATION_PROBE"` in `constants.py`. `--verify --strict-prose` FAILED hard
-  -- not just prose drift: one corpus case's DECISION itself changed (an
-  `undecidable_fallback=allow` case's reason switched from a genuine-allow wording to an
-  unrelated ask-floor wording), proving the constant is genuinely load-bearing, not just
-  present. Reverted; `--verify --strict-prose` passed again; `grep -n "CALIBRATION PROBE"`
-  found nothing; `git status --porcelain -- toolguard/constants.py` showed only the
-  legitimate 8-constant addition.
-- Entry-point smoke test: all 8 console-script modules import cleanly.
+`Ran 4130 tests` / `OK (expected failures=4)` -- identical count to before the rename, confirming no behavior moved. `ruff format .` -> 3 files reformatted (cosmetic re-wrap from longer identifiers only), `ruff format --check .` clean on re-run; `ruff check .` -> `All checks passed!`. 3 fitness checks PASS. Corpus `OK: no differences` at 6401/61 (no re-calibration needed for a pure rename with no corpus config using the key -- the round-2 broad calibration already proved the underlying mechanism is corpus-visible; this round changed no logic). 8 entry points import cleanly. Live end-to-end re-run with the renamed key: `uv run python script.py` under `{ match = "...", program_source = "file" }` -> `allow`; `uv run python -c "..."` -> `ask`; and the file-path rejection message now reads `'program_source' has no effect in the rule entry for 'Read(...)' -- 'Read' is a file-path tool, and 'program_source' only classifies commands.`
 
+### A mistake I made and did not fix myself
 
-## New task: TOO-28 Phase 3 -- per-rule auto-mode decision (spec 4.2)
-
-Brief validated (`brief-phase3.md`, 5/5 slots). Mid-task, the coordinator sent three
-corrections from Arnon on the brief itself (not on my work): rename `in_auto_mode` ->
-`auto_mode_behavior` everywhere; drop the config-time refusal of `deny` + widening (any list,
-any direction, is now permitted -- only `[hard_deny]` is absolute); and make the
-provenance-ordering hazard structurally impossible, not just correctly ordered. All three
-applied to what was already built, before this report.
-
-### Design
-
-- **`rule_entry.py`**: `AUTO_MODE_BEHAVIOR_KEY = "auto_mode_behavior"`, added to
-  `KNOWN_ENRICHMENT_KEYS`. `RuleEntry.auto_mode_behavior` property (mirrors
-  `additional_context`): returns one of `DECISION_ALLOW`/`DECISION_DENY`/`DECISION_ASK`, or
-  `None` for absent/unrecognized. `_auto_mode_behavior_issues` (mirrors
-  `_additional_context_issues`): an unrecognized value is an `error`-level `Issue`, but the
-  rule still applies -- only its auto-mode declaration is ignored, same as a wrong-typed
-  `additionalContext`. No refusal logic anywhere -- correction 2 removed the one place I had
-  started adding it (`config_validation.py`; final diff there is empty, confirmed by
-  `git diff --stat`).
-- **`permission_resolution.py`**, the one seam (see Findings below): `_matched_rule_lookup(layers,
-  result)` -- a new pure helper, keyed by `result.decision` read directly off the already-built
-  frozen `LevelMatch`, never a local variable. This is the structural fix correction 3 asked
-  for: `_resolve_unclamped`'s matched-level branch now reads `result.decision`/`.reason`/
-  `.matched_pattern` directly throughout and never binds a mutable `decision` local at all, so
-  there is no variable a future edit could reassign ahead of the lookup to reintroduce the
-  ordering trap -- the auto-mode decision is computed strictly AFTER, from
-  `_matched_rule_lookup`'s return value, a genuine data dependency Python enforces (an early
-  read raises `NameError`), not merely a statement-order convention. `permission_mode` threaded
-  through `_resolve_unclamped`/`resolve_permission_cascade`/both public entry points. The
-  override (allow-over-deny conflict) check runs against the EFFECTIVE (post-auto-mode)
-  decision, so a widened ask-to-allow gets the same conflict logging any other allow would.
-
-### Verification of the brief's own five unverified claims
-
-1. **"`permission_resolution.py:252` is the only place a matched rule's decision is finalised"**
-   -- CONFIRMED. Traced both entry points (`resolve_command_permission`/
-   `resolve_file_path_permission`) to the SAME `resolve_permission_cascade`/`_resolve_unclamped`
-   chokepoint; traced `resolve.py`'s Bash path (`_decide`, called once per leaf) and file-path
-   path (`resolve_file_path_permission_detailed`) to confirm both route through it; traced
-   `api.decide()` to confirm it delegates to `resolve_bash_permission_detailed`/
-   `resolve_file_path_permission_detailed`, never bypassing it. One seam, not scattered.
-2. **"`kind = decision` is the only ordering hazard"** -- no second hazard found; the override
-   check (`_detect_override`) was the other candidate and is now deliberately keyed off the
-   EFFECTIVE decision (a considered choice, not an oversight -- see Design above).
-3. **"`RuleEntry.metadata` validation is the right home for rejecting a bad value"** -- TRUE for
-   the unrecognized-VALUE case (mirrors `additionalContext` exactly, no list-membership needed).
-   Moot for the deny+allow case after correction 2 removed that check entirely.
-4. **(superseded by correction 2)** -- no longer applicable; nothing needs list membership at
-   validation time now.
-5. **"The compound path needs nothing"** -- CONFIRMED, not just assumed: added
-   `TestPerRuleAutoModeBehaviorInACompound` (3 tests) proving a per-leaf `auto_mode_behavior`
-   widens/narrows correctly inside a real compound command, and that `_combine_strictest`
-   correctly combines already-decided per-leaf verdicts without re-deriving anything.
-
-### Verification performed
-
-- Baseline (before this phase): `Ran 4064 tests` / `OK`. Final: `Ran 4085 tests` / `OK
-  (expected failures=4)` -- +21 tests, all new (`TestAutoModeBehavior` in `test_rule_entry.py`,
-  7; one pre-existing exact-set test updated in place, `test_known_enrichment_keys_...`, to
-  include the new known key -- a direct, expected consequence of this feature, not a
-  weakening; `TestPerRuleAutoModeBehavior`, 9; `TestHardDenyRegressionGuards`, 2;
-  `TestAutoModeBehaviorUnderParseFailure`, 1; `TestPerRuleAutoModeBehaviorInACompound`, 3).
-- RED evidence (pasted in transcript, all reverted after): disabling the auto-mode-decision
-  block entirely failed 7 of 9 `TestPerRuleAutoModeBehavior` tests correctly (the 2 that stayed
-  green -- inertness and the parse-failure floor -- are expected to, since neither depends on
-  the feature actually firing). Separately, simulating the ordering trap itself (forcing
-  `_matched_rule_lookup` to look up the WRONG list) failed 4 new tests AND 1 PRE-EXISTING test
-  (`TestDenyUnderBrokenConfigKeepsProvenance`) with an `AssertionError`/error, proving the
-  provenance/`additionalContext`/`matched_rule` tests genuinely catch a wrong-list lookup, not
-  just a disabled feature.
-- Corpus: `tools/corpus_build.py --verify --strict-prose` -> `OK: no differences` at 6401/61,
-  with no rule in this repo's own config carrying the key. Calibrated by forcing
-  `effective_decision = DECISION_ASK` unconditionally -- confirmed `--verify` FAILS broadly
-  (multiple sub-commands showed a spurious "requires approval" reason), reverted, confirmed
-  passes, `git status --porcelain` clean.
-- Three fitness checks (`--stdlib`/`--ambient`/`--layers`): PASS. `test.unit.test_architecture`
-  (27 tests): PASS -- `rule_entry`'s exact import allow-list gained `toolguard.constants`
-  (needed for `DECISION_*`), module docstring updated to match.
-- Entry points: all 8 console-script modules import cleanly.
-- Live end-to-end: real `toolguard.hook:main`, piped synthetic `PreToolUse` JSON, scratch
-  project with `ask = [{ match = "Bash(git push:*)", auto_mode_behavior = "allow" }]`. Under
-  `permission_mode: "auto"`: `"allow"`, reason ending
-  `"-- auto_mode_behavior='allow' applied (permission_mode=auto)"`. Under `"default"`: `"ask"`,
-  unaffected. Both pasted in the transcript; scratch dir cleaned up after, no stray writes to
-  the real `logs/` directory.
-
-### Documentation
-
-`docs/configuration.md`: new "Per-rule auto-mode behavior" section, placed after "Fallback
-settings in auto mode" per the brief's scope instruction, covering both directions, the
-`[hard_deny]` exception, the "not an override" naming decision, and unrecognized-value
-handling; ToC entry added. `docs/agent-map.md`: matching ToC entry plus one new Q&A. Not
-touched: `install.md`, bundled skills (TOO-77, per brief).
-
-### Flagged as instructed, not done
-
-**Converting this repo's own disclosure-nudge rule** to use `auto_mode_behavior` -- explicitly
-out of scope per the brief (would move a real decision in `.claude/toolguard_hook.toml` and
-require regenerating the verdict corpus). Noted here as the follow-up the brief asked me to flag.
-
-### Files touched (8)
-
-`toolguard/rule_entry.py`, `toolguard/permission_resolution.py`,
-`test/unit/test_architecture.py`, `test/unit/test_rule_entry.py`,
-`test/unit/test_permission_resolution.py`, `test/unit/test_resolve.py`,
-`docs/configuration.md`, `docs/agent-map.md`. `toolguard/config_validation.py` was touched
-mid-task (the now-removed refusal check) and reverted cleanly -- confirmed via
-`git diff --stat` showing zero changes.
+While renaming the test file I used `git mv` (not `mv`) out of habit -- this **staged** the file (`git status` now shows `AM test/unit/test_classify_program_source.py` instead of untracked `??`). This is a git write operation I should not have performed. I did **not** run any further git command to correct it, per policy (hand over the command line rather than compound the mistake with another write). **Remedy, for Arnon to run if desired**: `git restore --staged test/unit/test_classify_program_source.py` (or `git reset HEAD -- test/unit/test_classify_program_source.py`) returns it to untracked, matching every other new file from this phase.
