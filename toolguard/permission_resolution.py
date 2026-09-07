@@ -200,12 +200,45 @@ def _detect_override(
     return None
 
 
+def _matched_rule_lookup(layers: Tuple[ToolPatternLayer, ...], result: LevelMatch):
+    """
+    Resolve one matched level's provenance and winning rule entry.
+
+    Return type deliberately left to inference rather than named -- this module's
+    own docstring restricts its toolguard imports to :mod:`toolguard.config_types`,
+    :mod:`toolguard.constants`, :mod:`toolguard.permissions`, and
+    :mod:`toolguard.file_matching`, and neither ``Provenance`` nor ``RuleEntry`` is
+    among them; see :func:`~toolguard.config_types.provenance_for_pattern`/
+    :func:`~toolguard.config_types.entry_for_pattern`, which this delegates to, for
+    the real types.
+
+    Keyed by ``result.decision`` -- read directly off the already-built, frozen
+    ``LevelMatch``, never copied to a local that a later edit could reassign.
+    Structural, not just ordered correctly: a per-rule auto-mode decision
+    (TOO-28 spec 4.2) is computed from THIS function's return value, so it
+    cannot be fed back in as the lookup key without first constructing a new
+    ``LevelMatch`` -- reordering statements in the caller cannot reintroduce the
+    hazard this guards against (searching the wrong allow/deny/ask list).
+
+    Args:
+        layers: The matched level's contributing layers.
+        result: The level's own match, not ``None``.
+
+    Returns:
+        ``(provenance, winning_entry)``, either possibly ``None``.
+    """
+    prov = provenance_for_pattern(layers, result.matched_pattern, result.decision)
+    winning_entry = entry_for_pattern(layers, result.matched_pattern, result.decision)
+    return prov, winning_entry
+
+
 def _resolve_unclamped(
     levels: Sequence[LevelOutcome],
     tool_name: str,
     has_any_rules: bool,
     no_match_fallback: str,
     subject: str = "Command",
+    permission_mode: Optional[str] = None,
 ) -> RuntimeVerdict:
     """
     The raw more-specific-wins fold, BEFORE the TOO-19 ASK floor.
@@ -226,6 +259,14 @@ def _resolve_unclamped(
             :meth:`~toolguard.config_types.ResolutionConfig.resolved_no_match_fallback`.
         subject: The noun the no-match-fallback reason (below) opens with --
             ``"Command"`` for Bash, ``"Path"`` for a file-path tool.
+        permission_mode: Claude Code's own permission mode (TOO-28 spec 4.2), or
+            ``None``. When it is :data:`~toolguard.config_types.AUTO_PERMISSION_MODE`
+            and the winning rule declares its own ``auto_mode_behavior`` decision
+            (see :attr:`~toolguard.rule_entry.RuleEntry.auto_mode_behavior`), that
+            decision replaces the matched level's own -- applied only AFTER
+            :func:`_matched_rule_lookup`, which resolves provenance/entry from the
+            level's REAL matched decision, never from one an auto-mode declaration
+            may since have replaced.
 
     Returns the internal cascade verdict, with ``tool``/``target`` left
     ``None`` (this function is never handed a target string) and
@@ -239,26 +280,36 @@ def _resolve_unclamped(
     for index, (result, layers) in enumerate(levels):
         if result is None:
             continue
-        decision, reason, matched_pattern = (
-            result.decision,
-            result.reason,
-            result.matched_pattern,
-        )
-        # decision is 'allow' | 'ask' | 'deny'; map it to the list the matched
-        # pattern lives in so provenance resolves to the right rule.
-        kind = decision
-        prov = provenance_for_pattern(layers, matched_pattern, kind)
-        reason_with_prov = _append_provenance(reason, prov)
-        winning_entry = entry_for_pattern(layers, matched_pattern, kind)
+        prov, winning_entry = _matched_rule_lookup(layers, result)
+        reason_with_prov = _append_provenance(result.reason, prov)
         additional_context = (
             winning_entry.additional_context if winning_entry is not None else None
         )
 
+        # The rule's own auto-mode decision (TOO-28 spec 4.2). Reads
+        # result.decision directly, never a copy -- result is an already-built,
+        # frozen LevelMatch, so this and _matched_rule_lookup above are both
+        # structurally pinned to the level's one real matched outcome; there is
+        # no local "decision" variable a future edit could reassign ahead of the
+        # lookup and send it searching the wrong allow/deny/ask list.
+        effective_decision = result.decision
+        if (
+            permission_mode == AUTO_PERMISSION_MODE
+            and winning_entry is not None
+            and winning_entry.auto_mode_behavior is not None
+            and winning_entry.auto_mode_behavior != result.decision
+        ):
+            effective_decision = winning_entry.auto_mode_behavior
+            reason_with_prov = (
+                f"{reason_with_prov} -- auto_mode_behavior={effective_decision!r} "
+                f"applied (permission_mode=auto)"
+            )
+
         override = None
-        if decision == DECISION_ALLOW:
-            override = _detect_override(levels, index, matched_pattern, prov)
+        if effective_decision == DECISION_ALLOW:
+            override = _detect_override(levels, index, result.matched_pattern, prov)
         return RuntimeVerdict(
-            decision=decision,
+            decision=effective_decision,
             reason=reason_with_prov,
             provenance=prov,
             overrides=[(None, override)] if override is not None else [],
@@ -266,7 +317,7 @@ def _resolve_unclamped(
             # Carry the matched pattern rather than making a caller parse it
             # back out of `reason_with_prov` -- it is already in hand here,
             # since both lookups above key off it.
-            matched_rule=matched_pattern,
+            matched_rule=result.matched_pattern,
         )
 
     # No level matched anything for this command/path (TOO-15). Two distinct
@@ -344,6 +395,7 @@ def resolve_permission_cascade(
     has_any_rules: bool,
     no_match_fallback: str,
     subject: str = "Command",
+    permission_mode: Optional[str] = None,
 ) -> RuntimeVerdict:
     """
     Resolve a decision from already-computed per-level matches -- the pure fold.
@@ -377,9 +429,13 @@ def resolve_permission_cascade(
         subject: Forwarded to :func:`_resolve_unclamped` -- see that
             parameter's own docstring. Defaults to ``"Command"``;
             :func:`resolve_file_path_permission` passes ``"Path"``.
+        permission_mode: Forwarded to :func:`_resolve_unclamped` -- see that
+            parameter's own docstring. The ASK floor below is unconditional and
+            does not consult it: a per-rule auto-mode decision is floored exactly
+            like any other decision when a governed config file failed to parse.
     """
     resolved = _resolve_unclamped(
-        levels, tool_name, has_any_rules, no_match_fallback, subject
+        levels, tool_name, has_any_rules, no_match_fallback, subject, permission_mode
     )
     return _apply_ask_floor(parse_failures, resolved)
 
@@ -440,6 +496,7 @@ def resolve_command_permission(
         context.config.parse_failures,
         context.config.has_any_rules(context.tool_name),
         _effective_no_match_fallback(context),
+        permission_mode=context.permission_mode,
     )
 
 
@@ -486,4 +543,5 @@ def resolve_file_path_permission(
         context.config.has_any_rules(context.tool_name),
         _effective_no_match_fallback(context),
         subject="Path",
+        permission_mode=context.permission_mode,
     )

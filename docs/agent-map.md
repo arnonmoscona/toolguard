@@ -144,6 +144,14 @@ entry over letting it silently go stale.
   own resolved value rather than to a fixed default. Independently configurable -- setting
   one does not change the other. See
   [configuration.md#fallback-settings-in-auto-mode](configuration.md#fallback-settings-in-auto-mode).
+- **Q: Can ONE rule declare its own decision for auto mode, rather than the whole
+  no-match/undecidable fallback?**
+  A: Yes -- `auto_mode_behavior` on a structured rule entry (`{ match = "...",
+  auto_mode_behavior = "allow" }`), any list, any direction (an `ask` may widen to `allow`,
+  a `deny` may widen to `allow`, an `allow` may narrow to `ask`/`deny`). The one exception is
+  `[hard_deny]`: the key is silently ignored there, and nothing can carve an exception out of
+  a hard deny. See
+  [configuration.md#per-rule-auto-mode-behavior](configuration.md#per-rule-auto-mode-behavior).
 - **Q: What happens to Claude Code's own `Bash(*)`-style blanket allows once Takeover Mode
   is enabled?**
   A: Stripped from native settings as they're loaded, so they can't bypass the real
@@ -274,6 +282,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [No-match fallback](configuration.md#no-match-fallback)
 - [Undecidable fallback](configuration.md#undecidable-fallback)
 - [Fallback settings in auto mode](configuration.md#fallback-settings-in-auto-mode)
+- [Per-rule auto-mode behavior](configuration.md#per-rule-auto-mode-behavior)
 - [Assignments looked past when granting](configuration.md#assignments-looked-past-when-granting)
 - [Verifying configuration](configuration.md#verifying-configuration)
 - [Environment variables](configuration.md#environment-variables)

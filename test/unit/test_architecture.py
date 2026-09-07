@@ -60,7 +60,10 @@ LAYERS = (
         frozenset({"toolguard._git", "toolguard.ambient", "toolguard.constants"}),
     ),
     ("toolguard.config_write_guard", frozenset()),
-    ("toolguard.rule_entry", frozenset({"toolguard.issues"})),
+    (
+        "toolguard.rule_entry",
+        frozenset({"toolguard.issues", "toolguard.constants"}),
+    ),
     (
         "toolguard.rule_sort",
         frozenset({"toolguard.rule_entry", "toolguard.toml_scan"}),

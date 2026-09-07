@@ -9,9 +9,11 @@ import dataclasses
 import unittest
 from types import MappingProxyType
 
+from toolguard.constants import DECISION_ALLOW, DECISION_ASK, DECISION_DENY
 from toolguard.issues import Issue
 from toolguard.rule_entry import (
     ADDITIONAL_CONTEXT_KEY,
+    AUTO_MODE_BEHAVIOR_KEY,
     KNOWN_ENRICHMENT_KEYS,
     PATTERN_KEY,
     MergeConflict,
@@ -1152,14 +1154,20 @@ class TestModuleConstants(unittest.TestCase):
         """
         self.assertEqual(PATTERN_KEY, "match")
 
-    def test_known_enrichment_keys_holds_additional_context_only(self):
+    def test_known_enrichment_keys_holds_additional_context_and_auto_mode_behavior_only(
+        self,
+    ):
         """
         Given the KNOWN_ENRICHMENT_KEYS constant
         When inspected
-        Then it is a frozenset holding exactly "additionalContext" --
-             "match" (PATTERN_KEY) is never itself an enrichment key
+        Then it is a frozenset holding exactly "additionalContext" and
+             "auto_mode_behavior" (TOO-28 spec 4.2) -- "match" (PATTERN_KEY)
+             is never itself an enrichment key
         """
-        self.assertEqual(KNOWN_ENRICHMENT_KEYS, frozenset({ADDITIONAL_CONTEXT_KEY}))
+        self.assertEqual(
+            KNOWN_ENRICHMENT_KEYS,
+            frozenset({ADDITIONAL_CONTEXT_KEY, AUTO_MODE_BEHAVIOR_KEY}),
+        )
         self.assertIsInstance(KNOWN_ENRICHMENT_KEYS, frozenset)
         self.assertNotIn(PATTERN_KEY, KNOWN_ENRICHMENT_KEYS)
 
@@ -1332,6 +1340,106 @@ class TestAdditionalContext(unittest.TestCase):
         )
         self.assertEqual([i.level for i in issues], ["warning"])
         self.assertIn("notARealKey", issues[0].message)
+
+
+class TestAutoModeBehavior(unittest.TestCase):
+    """The `auto_mode_behavior` enrichment key (TOO-28 spec 4.2): registry entry, valid-value constraint, and the `RuleEntry.auto_mode_behavior` accessor."""
+
+    def test_auto_mode_behavior_is_a_known_enrichment_key(self):
+        """
+        Given this toolguard version
+        When the known-enrichment-key registry is inspected
+        Then 'auto_mode_behavior' is present, so it does not warn as unknown
+        """
+        self.assertIn(AUTO_MODE_BEHAVIOR_KEY, KNOWN_ENRICHMENT_KEYS)
+
+    def test_each_valid_decision_is_accepted_without_issues(self):
+        """
+        Given a structured entry whose auto_mode_behavior is each of the three
+            decisions in turn
+        When it is normalized
+        Then it normalizes cleanly and the accessor returns that decision
+        """
+        for decision in (DECISION_ALLOW, DECISION_DENY, DECISION_ASK):
+            with self.subTest(decision=decision):
+                entry, issues = normalize_entry(
+                    {PATTERN_KEY: "Bash(grep *)", AUTO_MODE_BEHAVIOR_KEY: decision},
+                    is_native=False,
+                )
+                self.assertEqual(issues, ())
+                self.assertEqual(entry.auto_mode_behavior, decision)
+
+    def test_unrecognized_value_reports_an_error_but_keeps_the_rule(self):
+        """
+        Given a structured entry whose auto_mode_behavior is not one of the
+            three decisions
+        When it is normalized
+        Then an error-level issue is reported, the RULE still normalizes, and
+            the accessor returns None so no auto-mode decision applies
+        """
+        entry, issues = normalize_entry(
+            {
+                PATTERN_KEY: "Bash(rm -rf *)",
+                AUTO_MODE_BEHAVIOR_KEY: "allow_with_warning",
+            },
+            is_native=False,
+        )
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.pattern, "Bash(rm -rf *)")
+        self.assertIsNone(entry.auto_mode_behavior)
+        self.assertEqual([i.level for i in issues], ["error"])
+        self.assertIn(AUTO_MODE_BEHAVIOR_KEY, issues[0].message)
+
+    def test_non_string_value_is_unrecognized_too(self):
+        """
+        Given a structured entry whose auto_mode_behavior is a bool
+        When it is normalized
+        Then it is reported the same as any other unrecognized value -- no
+            special-casing by type, unlike additionalContext
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(ls *)", AUTO_MODE_BEHAVIOR_KEY: True},
+            is_native=False,
+        )
+        self.assertIsNone(entry.auto_mode_behavior)
+        self.assertEqual([i.level for i in issues], ["error"])
+
+    def test_absent_key_yields_none_and_no_issues(self):
+        """
+        Given a structured entry with no auto_mode_behavior at all
+        When it is normalized
+        Then there are no issues and the accessor returns None
+        """
+        entry, issues = normalize_entry({PATTERN_KEY: "Bash(ls *)"}, is_native=False)
+        self.assertEqual(issues, ())
+        self.assertIsNone(entry.auto_mode_behavior)
+
+    def test_plain_string_entry_has_no_auto_mode_behavior(self):
+        """
+        Given a plain (unstructured) pattern string
+        When it is normalized
+        Then the accessor returns None, so the common case needs no special casing
+        """
+        entry, issues = normalize_entry("Bash(ls *)", is_native=False)
+        self.assertEqual(issues, ())
+        self.assertIsNone(entry.auto_mode_behavior)
+
+    def test_a_deny_rule_may_carry_an_allow_behavior_with_no_issue(self):
+        """
+        Given a deny-shaped rule (a normal RuleEntry has no list membership of
+            its own, but this is the value a caller from the deny list would
+            build) whose auto_mode_behavior is 'allow'
+        When it is normalized
+        Then it normalizes with NO issues -- Arnon, 2026-09-07: any list may
+            declare any decision; the classifier is the second gate the user
+            is choosing to trust, and only [hard_deny] is unconditional
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(rm -rf *)", AUTO_MODE_BEHAVIOR_KEY: DECISION_ALLOW},
+            is_native=False,
+        )
+        self.assertEqual(issues, ())
+        self.assertEqual(entry.auto_mode_behavior, DECISION_ALLOW)
 
 
 if __name__ == "__main__":

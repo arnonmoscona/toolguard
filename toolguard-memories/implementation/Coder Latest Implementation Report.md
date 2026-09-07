@@ -434,3 +434,114 @@ documentation for a human, the same category as a docstring, not a compared/disp
   found nothing; `git status --porcelain -- toolguard/constants.py` showed only the
   legitimate 8-constant addition.
 - Entry-point smoke test: all 8 console-script modules import cleanly.
+
+
+## New task: TOO-28 Phase 3 -- per-rule auto-mode decision (spec 4.2)
+
+Brief validated (`brief-phase3.md`, 5/5 slots). Mid-task, the coordinator sent three
+corrections from Arnon on the brief itself (not on my work): rename `in_auto_mode` ->
+`auto_mode_behavior` everywhere; drop the config-time refusal of `deny` + widening (any list,
+any direction, is now permitted -- only `[hard_deny]` is absolute); and make the
+provenance-ordering hazard structurally impossible, not just correctly ordered. All three
+applied to what was already built, before this report.
+
+### Design
+
+- **`rule_entry.py`**: `AUTO_MODE_BEHAVIOR_KEY = "auto_mode_behavior"`, added to
+  `KNOWN_ENRICHMENT_KEYS`. `RuleEntry.auto_mode_behavior` property (mirrors
+  `additional_context`): returns one of `DECISION_ALLOW`/`DECISION_DENY`/`DECISION_ASK`, or
+  `None` for absent/unrecognized. `_auto_mode_behavior_issues` (mirrors
+  `_additional_context_issues`): an unrecognized value is an `error`-level `Issue`, but the
+  rule still applies -- only its auto-mode declaration is ignored, same as a wrong-typed
+  `additionalContext`. No refusal logic anywhere -- correction 2 removed the one place I had
+  started adding it (`config_validation.py`; final diff there is empty, confirmed by
+  `git diff --stat`).
+- **`permission_resolution.py`**, the one seam (see Findings below): `_matched_rule_lookup(layers,
+  result)` -- a new pure helper, keyed by `result.decision` read directly off the already-built
+  frozen `LevelMatch`, never a local variable. This is the structural fix correction 3 asked
+  for: `_resolve_unclamped`'s matched-level branch now reads `result.decision`/`.reason`/
+  `.matched_pattern` directly throughout and never binds a mutable `decision` local at all, so
+  there is no variable a future edit could reassign ahead of the lookup to reintroduce the
+  ordering trap -- the auto-mode decision is computed strictly AFTER, from
+  `_matched_rule_lookup`'s return value, a genuine data dependency Python enforces (an early
+  read raises `NameError`), not merely a statement-order convention. `permission_mode` threaded
+  through `_resolve_unclamped`/`resolve_permission_cascade`/both public entry points. The
+  override (allow-over-deny conflict) check runs against the EFFECTIVE (post-auto-mode)
+  decision, so a widened ask-to-allow gets the same conflict logging any other allow would.
+
+### Verification of the brief's own five unverified claims
+
+1. **"`permission_resolution.py:252` is the only place a matched rule's decision is finalised"**
+   -- CONFIRMED. Traced both entry points (`resolve_command_permission`/
+   `resolve_file_path_permission`) to the SAME `resolve_permission_cascade`/`_resolve_unclamped`
+   chokepoint; traced `resolve.py`'s Bash path (`_decide`, called once per leaf) and file-path
+   path (`resolve_file_path_permission_detailed`) to confirm both route through it; traced
+   `api.decide()` to confirm it delegates to `resolve_bash_permission_detailed`/
+   `resolve_file_path_permission_detailed`, never bypassing it. One seam, not scattered.
+2. **"`kind = decision` is the only ordering hazard"** -- no second hazard found; the override
+   check (`_detect_override`) was the other candidate and is now deliberately keyed off the
+   EFFECTIVE decision (a considered choice, not an oversight -- see Design above).
+3. **"`RuleEntry.metadata` validation is the right home for rejecting a bad value"** -- TRUE for
+   the unrecognized-VALUE case (mirrors `additionalContext` exactly, no list-membership needed).
+   Moot for the deny+allow case after correction 2 removed that check entirely.
+4. **(superseded by correction 2)** -- no longer applicable; nothing needs list membership at
+   validation time now.
+5. **"The compound path needs nothing"** -- CONFIRMED, not just assumed: added
+   `TestPerRuleAutoModeBehaviorInACompound` (3 tests) proving a per-leaf `auto_mode_behavior`
+   widens/narrows correctly inside a real compound command, and that `_combine_strictest`
+   correctly combines already-decided per-leaf verdicts without re-deriving anything.
+
+### Verification performed
+
+- Baseline (before this phase): `Ran 4064 tests` / `OK`. Final: `Ran 4085 tests` / `OK
+  (expected failures=4)` -- +21 tests, all new (`TestAutoModeBehavior` in `test_rule_entry.py`,
+  7; one pre-existing exact-set test updated in place, `test_known_enrichment_keys_...`, to
+  include the new known key -- a direct, expected consequence of this feature, not a
+  weakening; `TestPerRuleAutoModeBehavior`, 9; `TestHardDenyRegressionGuards`, 2;
+  `TestAutoModeBehaviorUnderParseFailure`, 1; `TestPerRuleAutoModeBehaviorInACompound`, 3).
+- RED evidence (pasted in transcript, all reverted after): disabling the auto-mode-decision
+  block entirely failed 7 of 9 `TestPerRuleAutoModeBehavior` tests correctly (the 2 that stayed
+  green -- inertness and the parse-failure floor -- are expected to, since neither depends on
+  the feature actually firing). Separately, simulating the ordering trap itself (forcing
+  `_matched_rule_lookup` to look up the WRONG list) failed 4 new tests AND 1 PRE-EXISTING test
+  (`TestDenyUnderBrokenConfigKeepsProvenance`) with an `AssertionError`/error, proving the
+  provenance/`additionalContext`/`matched_rule` tests genuinely catch a wrong-list lookup, not
+  just a disabled feature.
+- Corpus: `tools/corpus_build.py --verify --strict-prose` -> `OK: no differences` at 6401/61,
+  with no rule in this repo's own config carrying the key. Calibrated by forcing
+  `effective_decision = DECISION_ASK` unconditionally -- confirmed `--verify` FAILS broadly
+  (multiple sub-commands showed a spurious "requires approval" reason), reverted, confirmed
+  passes, `git status --porcelain` clean.
+- Three fitness checks (`--stdlib`/`--ambient`/`--layers`): PASS. `test.unit.test_architecture`
+  (27 tests): PASS -- `rule_entry`'s exact import allow-list gained `toolguard.constants`
+  (needed for `DECISION_*`), module docstring updated to match.
+- Entry points: all 8 console-script modules import cleanly.
+- Live end-to-end: real `toolguard.hook:main`, piped synthetic `PreToolUse` JSON, scratch
+  project with `ask = [{ match = "Bash(git push:*)", auto_mode_behavior = "allow" }]`. Under
+  `permission_mode: "auto"`: `"allow"`, reason ending
+  `"-- auto_mode_behavior='allow' applied (permission_mode=auto)"`. Under `"default"`: `"ask"`,
+  unaffected. Both pasted in the transcript; scratch dir cleaned up after, no stray writes to
+  the real `logs/` directory.
+
+### Documentation
+
+`docs/configuration.md`: new "Per-rule auto-mode behavior" section, placed after "Fallback
+settings in auto mode" per the brief's scope instruction, covering both directions, the
+`[hard_deny]` exception, the "not an override" naming decision, and unrecognized-value
+handling; ToC entry added. `docs/agent-map.md`: matching ToC entry plus one new Q&A. Not
+touched: `install.md`, bundled skills (TOO-77, per brief).
+
+### Flagged as instructed, not done
+
+**Converting this repo's own disclosure-nudge rule** to use `auto_mode_behavior` -- explicitly
+out of scope per the brief (would move a real decision in `.claude/toolguard_hook.toml` and
+require regenerating the verdict corpus). Noted here as the follow-up the brief asked me to flag.
+
+### Files touched (8)
+
+`toolguard/rule_entry.py`, `toolguard/permission_resolution.py`,
+`test/unit/test_architecture.py`, `test/unit/test_rule_entry.py`,
+`test/unit/test_permission_resolution.py`, `test/unit/test_resolve.py`,
+`docs/configuration.md`, `docs/agent-map.md`. `toolguard/config_validation.py` was touched
+mid-task (the now-removed refusal check) and reverted cleanly -- confirmed via
+`git diff --stat` showing zero changes.

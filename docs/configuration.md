@@ -33,6 +33,8 @@ question in front of you.
   safely parsed at all
 - [Fallback settings in auto mode](#fallback-settings-in-auto-mode) -- resolving the two
   settings above differently when Claude Code's own permission mode is auto
+- [Per-rule auto-mode behavior](#per-rule-auto-mode-behavior) -- one rule declaring its own
+  decision for auto mode
 - [Assignments looked past when granting](#assignments-looked-past-when-granting) -- letting
   an allow rule see past a leading `VAR=value`
 - [Verifying configuration](#verifying-configuration)
@@ -680,6 +682,27 @@ undecidable_fallback_in_auto_mode = "allow"     # same values as undecidable_fal
 **Resolution and scope**: more-specific-wins across the [configuration hierarchy](#configuration-hierarchy), applies in both takeover and non-takeover modes, and neither has a `[takeover_mode]` legacy form -- both are brand-new keys with no prior spelling to preserve.
 
 `tools/takeover_audit.py` (surfaced by `toolguard-audit`) reports both of these alongside the base settings' own `loose-no-match-fallback`/`loose-undecidable-fallback` findings, but only when the auto-mode value is both configured and looser than the base one -- an unset auto setting is already covered by the base finding, so it does not duplicate it. Note that this audit has no live `permission_mode` to check against, so it always reports what these settings *would* resolve to, not whether a given call actually ran in auto mode.
+
+## Per-rule auto-mode behavior
+
+`auto_mode_behavior` lets ONE rule declare its own decision for Claude Code's auto permission mode, independent of what the rest of its list resolves to. It rides on the same structured-entry mechanism as `additionalContext` (see [additionalContext: injecting guidance alongside a decision](#additionalcontext-injecting-guidance-alongside-a-decision)) rather than a new pattern dialect:
+
+```toml
+[permissions]
+ask = [
+    { match = "Bash(git push:*)", auto_mode_behavior = "allow" },
+]
+```
+
+**Both directions are supported, on any list.** An `ask` rule widening to `allow` is the primary case -- an attested, read-only or otherwise low-risk operation that only costs a prompt because no rule fully covers it. Narrowing (`ask` to `deny`, or `allow` to `ask`/`deny`) is equally valid: friction exactly where human judgement is absent. **A `deny` rule may also widen to `allow`.** Arnon, 2026-09-07: *"I may as well actually allow something in auto mode that is otherwise denied. This is because the auto mode classifier may be trusted enough in some cases."* Nothing here restricts which list may carry the key or which direction it may move a decision -- that is the point of trusting the classifier as a second, independent gate.
+
+**`[hard_deny]` is the one exception, and it is absolute.** An `auto_mode_behavior` written on a `[hard_deny]` entry is silently ignored -- `Configuration.hard_deny()` never exposes a hard-deny entry's enrichment metadata at all, by design (Arnon, 2026-09-05: *"Hard-deny should be trivial to understand with as little subtlety as feasible... If you start adding modifiers it stops being 'hard'"*). No permission-mode declaration, on any entry, can carve an exception out of a hard deny.
+
+**Recognized values are the three decisions**: `"allow"`, `"deny"`, or `"ask"` -- not the fallback-setting spellings (`allow_with_warning` and its alias) a rule cannot distinguish for itself the way a fallback setting can. An unrecognized value is a **config-time issue**: the rule still applies normally in every mode, only its auto-mode declaration is ignored, exactly like an `additionalContext` value of the wrong type.
+
+**Not called "override" anywhere in code or docs.** `RuntimeVerdict.overrides` already means allow-over-deny conflict detection (a *different* rule at a less-specific level being superseded) -- reusing that word for a rule's own auto-mode decision would recreate the vocabulary split this project has already spent a commit removing. An allow this key produces is still checked for that kind of conflict like any other allow.
+
+Behaviour-neutral when no rule carries the key: nothing changes in any mode.
 
 ## Assignments looked past when granting
 

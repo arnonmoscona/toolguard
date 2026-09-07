@@ -1085,6 +1085,125 @@ class TestUndecidableFallbackAutoMode(unittest.TestCase):
     # combination) from one registry-driven test instead of one method per setting.
 
 
+class TestPerRuleAutoModeBehaviorInACompound(unittest.TestCase):
+    """
+    A compound command's leaves each resolve independently through
+    resolve_command_permission (TOO-28 spec 4.2's per-rule seam), then
+    _combine_strictest picks/combines ALREADY-DECIDED verdicts -- it never re-derives a
+    decision from a rule match. So a per-leaf auto_mode_behavior needs no separate
+    handling here; these tests are the sibling-sweep confirmation of that (brief's own
+    unverified claim #5), not new production code.
+    """
+
+    def _resolve(self, config, command, permission_mode):
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode=permission_mode,
+        )
+        return resolve_bash_permission_detailed(command, invocation)
+
+    def test_one_leaf_widens_and_the_other_stays_allowed(self):
+        """
+        Given a compound command with two leaves: one matches an ask rule
+            declaring auto_mode_behavior='allow', the other an ordinary allow
+            rule
+        When resolved under permission_mode='auto'
+        Then the whole compound allows -- each leaf resolved independently
+            through the same per-rule seam a single command would
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(ls)"],
+                            "ask": [
+                                {
+                                    "match": "Bash(git push:*)",
+                                    "auto_mode_behavior": "allow",
+                                }
+                            ],
+                        }
+                    },
+                )
+            ]
+        )
+
+        result = self._resolve(config, "ls && git push origin main", "auto")
+
+        self.assertEqual(result.decision, "allow")
+
+    def test_one_leaf_narrows_and_strictest_wins_denies_the_whole_compound(self):
+        """
+        Given a compound command with two leaves: one matches an ordinary
+            allow rule, the other an ask rule declaring
+            auto_mode_behavior='deny'
+        When resolved under permission_mode='auto'
+        Then the whole compound denies -- strictest-wins over the two
+            independently-resolved per-leaf verdicts, one of which the
+            per-rule seam narrowed
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(ls)"],
+                            "ask": [
+                                {
+                                    "match": "Bash(git push:*)",
+                                    "auto_mode_behavior": "deny",
+                                }
+                            ],
+                        }
+                    },
+                )
+            ]
+        )
+
+        result = self._resolve(config, "ls && git push origin main", "auto")
+
+        self.assertEqual(result.decision, "deny")
+
+    def test_default_mode_leaves_the_compound_unaffected(self):
+        """
+        Given the SAME compound command and config as the widening test above
+        When resolved under permission_mode='default'
+        Then the whole compound asks -- the per-leaf ask rule's own decision,
+            with no auto-mode widening applied
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(ls)"],
+                            "ask": [
+                                {
+                                    "match": "Bash(git push:*)",
+                                    "auto_mode_behavior": "allow",
+                                }
+                            ],
+                        }
+                    },
+                )
+            ]
+        )
+
+        result = self._resolve(config, "ls && git push origin main", "default")
+
+        self.assertEqual(result.decision, "ask")
+
+
 class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
     """A single-leaf ask-floor command and a multi-leaf compound wrapping the same leaf must agree on fallback_warning and never fabricate a matched rule."""
 

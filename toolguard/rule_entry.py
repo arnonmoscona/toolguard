@@ -10,10 +10,10 @@ structured ``{match = "...", ...}`` table form -- into one immutable
 cannot be normalized always comes back with an
 :class:`~toolguard.issues.Issue` explaining why.
 
-This module imports nothing from :mod:`toolguard` except
-:mod:`toolguard.issues`, keeping it a leaf that both :mod:`toolguard.config`
-and :mod:`toolguard.config_validation` can depend on without a circular
-import (``config`` imports ``config_validation``, so neither could host this).
+This module imports nothing from :mod:`toolguard` except :mod:`toolguard.issues` and
+:mod:`toolguard.constants` (both leaves themselves), keeping it a leaf that both
+:mod:`toolguard.config` and :mod:`toolguard.config_validation` can depend on without a
+circular import (``config`` imports ``config_validation``, so neither could host this).
 
 Structured entries are **single-line inline tables only**: TOML 1.0 requires an
 inline table on one line, and toolguard's loader is stdlib :mod:`tomllib`. A
@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+from toolguard.constants import DECISION_ALLOW, DECISION_ASK, DECISION_DENY
 from toolguard.issues import Issue
 
 #: The table key holding a structured entry's permission pattern, e.g.
@@ -38,11 +39,27 @@ PATTERN_KEY = "match"
 #: this entry is the deciding match for a tool call.
 ADDITIONAL_CONTEXT_KEY = "additionalContext"
 
+#: The enrichment key naming this entry's own decision when Claude Code's
+#: permission mode is auto (TOO-28 spec 4.2) -- e.g. an ``ask`` rule declaring
+#: ``auto_mode_behavior = "allow"`` to widen, or ``"deny"`` to narrow. Not an
+#: "override": see :mod:`toolguard.permission_resolution`'s own docstring for
+#: why that word is reserved for allow-over-deny conflict detection. One
+#: name for the concept, config spelling and code spelling alike.
+AUTO_MODE_BEHAVIOR_KEY = "auto_mode_behavior"
+
+#: Recognized values for :data:`AUTO_MODE_BEHAVIOR_KEY`. Deliberately just the
+#: three decisions -- no fallback-setting spellings (``allow_with_warning`` and
+#: its alias): a rule's own decision either fires or it does not, there is no
+#: "allow with a warning" for a single rule to distinguish.
+_VALID_AUTO_MODE_BEHAVIOR_VALUES = frozenset(
+    {DECISION_ALLOW, DECISION_DENY, DECISION_ASK}
+)
+
 #: Enrichment keys this toolguard version understands. ``match`` is the
 #: pattern key (:data:`PATTERN_KEY`), not an enrichment key, and is
 #: deliberately absent here. An unknown key is a WARNING, never an error --
 #: a newer config read by an older toolguard must degrade, not break.
-KNOWN_ENRICHMENT_KEYS = frozenset({ADDITIONAL_CONTEXT_KEY})
+KNOWN_ENRICHMENT_KEYS = frozenset({ADDITIONAL_CONTEXT_KEY, AUTO_MODE_BEHAVIOR_KEY})
 
 #: Structural matcher for a ``Tool(inner)`` permission wrapper: an
 #: identifier followed by a parenthesised body. The greedy ``.*`` lets the
@@ -195,6 +212,25 @@ class RuleEntry:
         """
         value = self.metadata.get(ADDITIONAL_CONTEXT_KEY)
         if isinstance(value, str) and value.strip():
+            return value
+        return None
+
+    @property
+    def auto_mode_behavior(self) -> Optional[str]:
+        """
+        This entry's own decision when Claude Code's permission mode is auto, if any.
+
+        The single accessor for ``auto_mode_behavior`` -- mirrors :attr:`additional_context`:
+        an unrecognized value yields ``None`` here (reported separately as a validation
+        error, see :func:`_auto_mode_behavior_issues`) rather than reaching a caller as a
+        string no resolver recognizes.
+
+        Returns:
+            One of the ``DECISION_*`` constants, or ``None`` when this entry carries no
+            usable auto-mode decision.
+        """
+        value = self.metadata.get(AUTO_MODE_BEHAVIOR_KEY)
+        if value in _VALID_AUTO_MODE_BEHAVIOR_VALUES:
             return value
         return None
 
@@ -419,6 +455,7 @@ def normalize_entry(
             if key not in KNOWN_ENRICHMENT_KEYS
         )
         issues += _additional_context_issues(pattern, metadata)
+        issues += _auto_mode_behavior_issues(pattern, metadata)
         return RuleEntry(pattern=pattern, metadata=metadata, raw=raw), issues
 
     return _reject(
@@ -471,6 +508,42 @@ def _additional_context_issues(pattern: str, metadata: Mapping[str, object]) -> 
                 f'Quote the value, e.g. {{ {PATTERN_KEY} = "{pattern}", '
                 f'{ADDITIONAL_CONTEXT_KEY} = "explanatory text" }}.'
             ),
+        ),
+    )
+
+
+def _auto_mode_behavior_issues(pattern: str, metadata: Mapping[str, object]) -> tuple:
+    """
+    Validate an ``auto_mode_behavior`` value, if the entry carries one.
+
+    Reported as an ``error``-level :class:`~toolguard.issues.Issue`, same shape as
+    :func:`_additional_context_issues` and for the same reason: an unrecognized value is
+    a configuration mistake, but the rule itself is still valid, so the entry is never
+    rejected over it -- only the auto-mode decision is ignored (see
+    :attr:`RuleEntry.auto_mode_behavior`), and the rule resolves as if the key were absent.
+
+    Args:
+        pattern: The entry's pattern, for the message.
+        metadata: The entry's enrichment mapping.
+
+    Returns:
+        A tuple of zero or one Issue.
+    """
+    if AUTO_MODE_BEHAVIOR_KEY not in metadata:
+        return ()
+    value = metadata[AUTO_MODE_BEHAVIOR_KEY]
+    if value in _VALID_AUTO_MODE_BEHAVIOR_VALUES:
+        return ()
+    accepted = ", ".join(sorted(_VALID_AUTO_MODE_BEHAVIOR_VALUES))
+    return (
+        Issue(
+            level="error",
+            message=(
+                f"'{AUTO_MODE_BEHAVIOR_KEY}' is not a recognized decision in the rule "
+                f"entry for '{pattern}', got {value!r} -- the rule still applies, but "
+                f"its auto-mode decision will be ignored."
+            ),
+            corrective_steps=f"Set '{AUTO_MODE_BEHAVIOR_KEY}' to one of: {accepted}.",
         ),
     )
 

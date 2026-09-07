@@ -30,7 +30,7 @@ _BROKEN_PATH = Path("/p/.claude/toolguard_hook.local.toml")
 _PARSE_FAILURES = ((_BROKEN_PATH, "unexpected character"),)
 
 
-def _layer(level, path, *, allow=(), deny=(), specificity=0, **settings):
+def _layer(level, path, *, allow=(), deny=(), ask=(), specificity=0, **settings):
     """
     Build one :class:`ConfigLayer` with zero file I/O, so no
     ``ConfigIsolationMixin`` is needed.
@@ -42,18 +42,23 @@ def _layer(level, path, *, allow=(), deny=(), specificity=0, **settings):
             either bare ``'Bash(...)'`` strings or
             ``{"match": ..., "additionalContext": ...}`` dicts.
         deny: Same, for ``permissions.deny``.
+        ask: Same, for ``permissions.ask``.
         specificity: Hierarchy distance from the project root; layers sharing a
             value collapse into one level. Two levels need two distinct values.
         settings: Extra top-level ``toolguard_hook`` keys, e.g.
             ``no_match_fallback``.
     """
     # Refuse rather than overwrite: 'permissions' arriving via **settings would be
-    # silently replaced by the allow=/deny= rebuild below, leaving a test that asserts
-    # against no rules at all and passes for the wrong reason.
+    # silently replaced by the allow=/deny=/ask= rebuild below, leaving a test that
+    # asserts against no rules at all and passes for the wrong reason.
     if "permissions" in settings:
-        raise TypeError("pass rules via allow=/deny=, not permissions=")
+        raise TypeError("pass rules via allow=/deny=/ask=, not permissions=")
     content = dict(settings)
-    content["permissions"] = {"allow": list(allow), "deny": list(deny)}
+    content["permissions"] = {
+        "allow": list(allow),
+        "deny": list(deny),
+        "ask": list(ask),
+    }
     return ConfigLayer(
         Provenance(level, "toolguard_hook", "toml", path, specificity),
         MappingProxyType(content),
@@ -504,6 +509,335 @@ class TestNoMatchFallbackAutoMode(unittest.TestCase):
         resolved = resolve_command_permission(invocation, "ls -la")
 
         self.assertEqual(resolved.decision, "allow")
+
+
+class TestPerRuleAutoModeBehavior(unittest.TestCase):
+    """
+    A matched rule's own ``auto_mode_behavior`` (TOO-28 spec 4.2) replaces its list's
+    decision only when ``permission_mode == 'auto'``, applied AFTER provenance and
+    ``additionalContext`` resolve against the rule's REAL matched decision -- so both
+    still attribute to the rule that actually decided, even though the effective
+    decision changed.
+    """
+
+    def _resolve(self, config, command, permission_mode):
+        """Resolve *command* with the given Invocation.permission_mode."""
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode=permission_mode,
+        )
+        return resolve_command_permission(invocation, command)
+
+    def test_widening_ask_rule_allows_under_auto_and_still_asks_under_default(self):
+        """
+        Given an ask rule declaring auto_mode_behavior='allow'
+        When the matching command is resolved once under permission_mode='auto'
+            and once under 'default'
+        Then the auto-mode call allows and the default-mode call still asks
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                ask=[{"match": "Bash(git push:*)", "auto_mode_behavior": "allow"}],
+            )
+        )
+        auto_result = self._resolve(config, "git push origin main", "auto")
+        default_result = self._resolve(config, "git push origin main", "default")
+
+        self.assertEqual(auto_result.decision, "allow")
+        self.assertEqual(default_result.decision, "ask")
+
+    def test_narrowing_ask_rule_denies_under_auto_and_still_asks_under_default(self):
+        """
+        Given an ask rule declaring auto_mode_behavior='deny'
+        When the matching command is resolved once under permission_mode='auto'
+            and once under 'default'
+        Then the auto-mode call denies and the default-mode call still asks
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                ask=[{"match": "Bash(git push:*)", "auto_mode_behavior": "deny"}],
+            )
+        )
+        auto_result = self._resolve(config, "git push origin main", "auto")
+        default_result = self._resolve(config, "git push origin main", "default")
+
+        self.assertEqual(auto_result.decision, "deny")
+        self.assertEqual(default_result.decision, "ask")
+
+    def test_rule_without_the_key_behaves_identically_under_every_mode(self):
+        """
+        Given an ordinary ask rule with no auto_mode_behavior at all
+        When the matching command is resolved under 'auto', 'default', and None
+        Then every mode resolves to 'ask' -- unset means unchanged, which is
+            what makes the corpus equivalence result (unset everywhere) mean
+            something
+        """
+        config = _config(_layer("project", _PROJECT_PATH, ask=["Bash(git push:*)"]))
+        for mode in ("auto", "default", None):
+            with self.subTest(mode=mode):
+                result = self._resolve(config, "git push origin main", mode)
+                self.assertEqual(result.decision, "ask")
+
+    def test_provenance_and_additional_context_survive_widening(self):
+        """
+        Given an ask rule carrying BOTH additionalContext and
+            auto_mode_behavior='allow', under permission_mode='auto'
+        When the matching command is resolved
+        Then the decision is 'allow', but matched_rule, provenance, and
+            additional_context all still attribute to the SAME ask rule that
+            actually matched -- proving the provenance/entry lookup used the
+            rule's real ('ask') decision, not the post-auto-mode 'allow'
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                ask=[
+                    {
+                        "match": "Bash(git push:*)",
+                        "additionalContext": "needs review",
+                        "auto_mode_behavior": "allow",
+                    }
+                ],
+            )
+        )
+
+        result = self._resolve(config, "git push origin main", "auto")
+
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.matched_rule, "git push:*")
+        self.assertIsNotNone(result.provenance)
+        self.assertEqual(result.provenance.path, _PROJECT_PATH)
+        self.assertEqual(result.additional_context, "needs review")
+
+    def test_provenance_and_additional_context_survive_widening_from_deny(self):
+        """
+        Given a DENY rule carrying additionalContext and
+            auto_mode_behavior='allow', under permission_mode='auto' -- the
+            ordering trap's sharpest case, since 'deny' and 'allow' are
+            DIFFERENT lists a naive reorder would search
+        When the matching command is resolved
+        Then the decision is 'allow', but matched_rule, provenance, and
+            additional_context still attribute to the DENY rule that actually
+            matched
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                deny=[
+                    {
+                        "match": "Bash(rm -rf *)",
+                        "additionalContext": "classifier trusted here",
+                        "auto_mode_behavior": "allow",
+                    }
+                ],
+            )
+        )
+
+        result = self._resolve(config, "rm -rf /tmp/x", "auto")
+
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.matched_rule, "rm -rf *")
+        self.assertIsNotNone(result.provenance)
+        self.assertEqual(result.provenance.path, _PROJECT_PATH)
+        self.assertEqual(result.additional_context, "classifier trusted here")
+
+    def test_provenance_survives_narrowing_from_allow(self):
+        """
+        Given an ALLOW rule declaring auto_mode_behavior='ask', under
+            permission_mode='auto'
+        When the matching command is resolved
+        Then the decision is 'ask', and matched_rule/provenance still
+            attribute to the ALLOW rule that actually matched
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[{"match": "Bash(git push:*)", "auto_mode_behavior": "ask"}],
+            )
+        )
+
+        result = self._resolve(config, "git push origin main", "auto")
+
+        self.assertEqual(result.decision, "ask")
+        self.assertEqual(result.matched_rule, "git push:*")
+        self.assertIsNotNone(result.provenance)
+
+    def test_deny_may_widen_to_allow_no_config_error(self):
+        """
+        Given a deny rule declaring auto_mode_behavior='allow'
+        When the config is built and the matching command is resolved under
+            'auto'
+        Then it resolves cleanly to 'allow' -- Arnon, 2026-09-07: any list may
+            declare any decision, the classifier is the second gate the user
+            chose to trust; only [hard_deny] is unconditional (see
+            TestHardDenyRegressionGuards)
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                deny=[{"match": "Bash(rm -rf *)", "auto_mode_behavior": "allow"}],
+            )
+        )
+
+        result = self._resolve(config, "rm -rf /tmp/x", "auto")
+
+        self.assertEqual(result.decision, "allow")
+
+    def test_widened_allow_is_still_checked_for_an_override_conflict(self):
+        """
+        Given a less-specific user-level deny and a more-specific project-level
+            ask rule for the same command, the ask rule declaring
+            auto_mode_behavior='allow'
+        When the command is resolved under permission_mode='auto'
+        Then the decision is 'allow' AND a ConflictOverride is recorded --
+            the override check runs against the EFFECTIVE (post-auto-mode)
+            decision, since this is now a genuine allow needing the same
+            allow-over-deny conflict logging any other allow gets
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                ask=[{"match": "Bash(git push:*)", "auto_mode_behavior": "allow"}],
+                specificity=0,
+            ),
+            _layer("user", _USER_PATH, deny=["Bash(git push:*)"], specificity=9),
+        )
+
+        result = self._resolve(config, "git push origin main", "auto")
+
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(len(result.overrides), 1)
+
+
+class TestHardDenyRegressionGuards(unittest.TestCase):
+    """
+    [hard_deny] is absolute and unconditional -- an ``auto_mode_behavior`` on a
+    permissions-list rule can never carve an exception out of it. ``check_hard_deny``
+    runs in ``resolve.py`` BEFORE any cascade matching (see
+    ``resolve_bash_permission_detailed``'s own docstring), so this holds structurally;
+    these tests pin it so a later refactor cannot silently break it.
+    """
+
+    def test_hard_denied_command_stays_denied_despite_a_matching_allow_rule(self):
+        """
+        Given a [hard_deny] pool denying a command, AND a permissions.allow
+            rule matching the same command with auto_mode_behavior='allow'
+        When the command is resolved under permission_mode='auto'
+        Then the decision is still 'deny' -- hard_deny is checked before the
+            cascade ever sees the allow rule's auto-mode declaration
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=[{"match": "Bash(rm -rf *)", "auto_mode_behavior": "allow"}],
+                hard_deny={"deny": ["Bash(rm -rf *)"]},
+            )
+        )
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode="auto",
+        )
+
+        result = resolve_bash_permission_detailed("rm -rf /tmp/x", invocation)
+
+        self.assertEqual(result.decision, "deny")
+
+    def test_hard_deny_allow_carve_out_ignores_its_own_auto_mode_behavior_key(self):
+        """
+        Given a [hard_deny].allow carve-out entry itself carrying
+            auto_mode_behavior='deny' (Arnon, 2026-09-05: the key inside
+            [hard_deny] is ignored, undocumented as a validator rule, by
+            design -- hard_deny stays trivially understandable), AND an
+            unrelated permissions.allow rule (no auto_mode_behavior) matching
+            the same command
+        When the command is resolved under permission_mode='auto'
+        Then the decision is 'allow' -- Configuration.hard_deny() never
+            exposes an entry's metadata at all (see its own docstring), so
+            the key has no way to reach this decision either way; the
+            cascade's own unrelated allow rule is what actually decides
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                allow=["Bash(rm -rf /tmp/*)"],
+                hard_deny={
+                    "deny": ["Bash(rm -rf *)"],
+                    "allow": [
+                        {
+                            "match": "Bash(rm -rf /tmp/*)",
+                            "auto_mode_behavior": "deny",
+                        }
+                    ],
+                },
+            )
+        )
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode="auto",
+        )
+
+        result = resolve_bash_permission_detailed("rm -rf /tmp/x", invocation)
+
+        self.assertEqual(result.decision, "allow")
+
+
+class TestAutoModeBehaviorUnderParseFailure(unittest.TestCase):
+    """
+    TOO-19 spec section 8: the parse-failure ASK floor sits above rule matching
+    (:func:`~toolguard.permission_resolution._apply_ask_floor`) and is unconditional --
+    a per-rule ``auto_mode_behavior`` cannot escape it, the same as no other
+    fallback-shaped setting can (see
+    ``test.unit.test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting``,
+    the Phase 2 enumerating test this is the per-rule sibling of).
+    """
+
+    def test_widened_allow_is_still_floored_to_ask_under_a_parse_failure(self):
+        """
+        Given an ask rule declaring auto_mode_behavior='allow', AND a recorded
+            parse failure, under permission_mode='auto'
+        When the matching command is resolved
+        Then the decision is 'ask' -- the floor clamps the effective decision
+            exactly like it would any other 'allow'
+        """
+        config = _config(
+            _layer(
+                "project",
+                _PROJECT_PATH,
+                ask=[{"match": "Bash(git push:*)", "auto_mode_behavior": "allow"}],
+            ),
+            parse_failures=_PARSE_FAILURES,
+        )
+        invocation = Invocation(
+            tool_name="Bash",
+            tool_input={},
+            config=config,
+            extended_syntax=True,
+            permission_mode="auto",
+        )
+
+        result = resolve_command_permission(invocation, "git push origin main")
+
+        self.assertEqual(result.decision, "ask")
 
 
 if __name__ == "__main__":
