@@ -1564,6 +1564,21 @@ class TestProgramSource(unittest.TestCase):
         self.assertIn(PROGRAM_SOURCE_KEY, issues[0].message)
         self.assertIn("Read", issues[0].message)
 
+    def test_an_unwrapped_pattern_reports_only_the_wrapper_issue(self):
+        """
+        Given an unwrapped 'match' value that also carries program_source='file'
+        When it is normalized
+        Then the only issue is the missing Tool(...) wrapper -- the guard's own
+            file-path-tool check names no tool for an unwrapped pattern and must
+            not add a second, misleading error on top of the real one
+        """
+        _entry, issues = normalize_entry(
+            {PATTERN_KEY: "uv run python *", PROGRAM_SOURCE_KEY: PROGRAM_SOURCE_FILE},
+            is_native=False,
+        )
+        self.assertEqual(len(issues), 1)
+        self.assertNotIn(PROGRAM_SOURCE_KEY, issues[0].message)
+
     def test_program_source_is_rejected_on_every_file_path_tool(self):
         """
         Given program_source='file' on a Read, Write, and Edit rule in turn

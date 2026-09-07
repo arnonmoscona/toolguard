@@ -10,6 +10,7 @@ Static-structure tests -- they parse the source rather than execute it.
 import ast
 import importlib
 import io
+import re
 import sys
 import tempfile
 import tomllib
@@ -535,6 +536,34 @@ class TestLayerMapAgreesWithArchitectureConfig(unittest.TestCase):
             f"A module added to .pyscn.toml but not to LAYERS silently loses "
             f"its per-module ratchet.",
         )
+
+    def test_the_documented_layer_table_matches_the_architecture_config(self):
+        """
+        Given docs/architecture-as-built.md's layer table, a hand copy of .pyscn.toml
+        When each row is compared against the declared packages for that layer
+        Then they agree exactly -- the doc asserts this completeness in prose, and
+            nothing checked it until two modules had already gone missing from it
+        """
+        doc = (TOOLGUARD_ROOT.parent / "docs" / "architecture-as-built.md").read_text()
+        rows = re.findall(r"^\| `([a-z]+)` \| (.+) \|$", doc, re.MULTILINE)
+        documented = {
+            layer: tuple(re.findall(r"`([a-z_/]+)`", cells)) for layer, cells in rows
+        }
+        self.assertEqual(
+            sorted(documented),
+            sorted(self.packages_by_layer),
+            "the documented table and .pyscn.toml disagree on which layers exist",
+        )
+        for layer, declared in self.packages_by_layer.items():
+            with self.subTest(layer=layer):
+                # `tooling`/`support` are spelled as directories in the doc
+                # (`tools/`) and as package names in the config (`tools`).
+                shown = tuple(name.rstrip("/") for name in documented[layer])
+                self.assertEqual(
+                    sorted(shown),
+                    sorted(declared),
+                    f"docs/architecture-as-built.md's `{layer}` row is out of date",
+                )
 
     def test_layers_never_permits_an_edge_the_architecture_config_forbids(self):
         """

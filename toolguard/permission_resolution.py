@@ -231,6 +231,12 @@ def _reason_naming_real_group(result: LevelMatch) -> str:
     ``ask`` list for a rule described as "matches allow pattern" would not find it
     (Arnon, 2026-09-07). The suffix :func:`_resolve_unclamped` appends already states
     what moved it; this states what the author actually wrote.
+
+    Rewriting produced prose is the wrong shape, and TOO-79 replaces it: the clause
+    is built before the real group is known, so the fix is to carry facts and render
+    the sentence once, at the edge. Do NOT instead thread the real group down into
+    :mod:`toolguard.permissions` -- that makes the matcher know more about the final
+    sentence, and the next enrichment then needs another parameter.
     """
     real_group = _real_group(result)
     if real_group == result.decision:

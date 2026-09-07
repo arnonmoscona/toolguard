@@ -1,6 +1,8 @@
 # Architecture, as built
 
-As of 2026-08-27 -- toolguard 0.6.0 -- commit 305caa3 (branch `too-45`)
+As of 2026-09-07 -- toolguard 0.7.0
+
+<sub>No commit hash: it cannot be known before the commit that would carry it, so it was always one revision stale. The version and date are advanced by the pre-push checklist, which is what keeps this line honest.</sub>
 
 This document explains the shape of toolguard as it stands today, not how it got there.
 
@@ -203,12 +205,12 @@ The two ends of the stack are special, for opposite reasons. `foundation` is gen
 
 ### Which module sits where
 
-This is the layer map itself, from `.pyscn.toml`. Completeness is machine-checked, so it cannot silently omit a module. Every name in it is relative to `toolguard/`: the `tooling` row means `toolguard/tools/` and `toolguard/scripts/`, not the top-level `tools/` of section 4.
+This is the layer map itself, from `.pyscn.toml`. The table below is checked against that file by `test_the_documented_layer_table_matches_the_architecture_config`, so it cannot silently omit a module -- it did, twice, for the two months before that test existed, which is why the check is named here rather than the guarantee simply asserted. Every name in it is relative to `toolguard/`: the `tooling` row means `toolguard/tools/` and `toolguard/scripts/`, not the top-level `tools/` of section 4.
 
 | layer | modules |
 |---|---|
-| `foundation` | `ambient`, `claude_code_contract`, `constants`, `issues`, `path_utils`, `normalization`, `patterns`, `toml_scan`, `_git`, `install_provenance`, `install_update`, `file_lock`, `tool_spec` |
-| `observability` | `log_writer`, `error_log`, `session_warnings`, `update_check`, `once_per_store`, `once_per`, `error_reporter` |
+| `foundation` | `ambient`, `claude_code_contract`, `constants`, `issues`, `path_utils`, `normalization`, `patterns`, `toml_scan`, `_git`, `install_provenance`, `install_update`, `file_lock`, `tool_spec`, `invocation` |
+| `observability` | `log_writer`, `error_log`, `session_warnings`, `update_check`, `once_per_store`, `once_per`, `error_reporter`, `auto_mode_trace` |
 | `config` | `rule_entry`, `config_types`, `config`, `config_validation`, `config_write_guard`, `env_config`, `rule_sort`, `auto_migrate`, `config_divergence`, `permission_migration` |
 | `engine` | `permissions`, `compound`, `resolve`, `permission_resolution`, `file_matching`, `parser/` |
 | `api` | `api` |
