@@ -397,6 +397,40 @@ Flagged rather than acted on.
 
 ---
 
+## 7.5 AFTER THE PUSH AND UPGRADE: fix the configuration of every affected project
+
+**This is the step that makes the ticket worth anything.** Every setting TOO-28 adds is inert until a config uses it, and five real configs on this machine currently carry `TEMPORARY until TOO-28 is done` markers that exist *because* the capability did not. Leaving them is the failure this project has measured nine times out of nine: a marker outliving its reason.
+
+**Sequence matters.** Do this only after `uv tool upgrade toolguard` **and** `toolguard-update-skills`, and after the hook smoke test — a config using `no_match_fallback_in_auto_mode` against an older installed toolguard produces an unrecognised-setting warning and silently keeps the old behaviour.
+
+```bash
+echo '{"session_id":"t","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"'$PWD'"}' | ~/.local/bin/toolguard
+```
+
+**Enumerated, not pointed at.** Each entry says what it carries, because "review the configs" is the shape that loses items:
+
+| # | config | what it carries now |
+|---|---|---|
+| 1 | `~/.claude/toolguard_hook.toml` | user-level fallbacks; `no_match_fallback = "ask"` at `[takeover_mode]`. **Same inode as `~/projects/dot_files/wsl/.claude/toolguard_hook.toml`** — one file, one edit, never "sync the copies" |
+| 2 | `~/projects/toolguard/.claude/toolguard_hook.toml` | both fallbacks `allow_with_no_warnings`, both marked `TEMPORARY until TOO-28 is done`, inside the `<TEMPORARY>` fence |
+| 3 | `~/projects/claude_tooling/.claude/toolguard_hook.toml` | both fallbacks `allow_with_no_warnings`, both marked TEMPORARY |
+| 4 | `~/projects/instagram-downloader/.claude/toolguard_hook.toml` | both fallbacks TEMPORARY, **plus four TEMPORARY allow rules** for `uv run python` shapes (lines ~89, ~90, ~121) |
+| 5 | `~/projects/flowers/featherhill/.claude/toolguard_hook.toml` | sets both fallbacks; no TOO-28 marker. The one honest user project — treat its outcome as the real signal |
+| 6 | `~/.toolguard/rules/git.rules.toml` | prose only: a comment reasoning *"temporary, until TOO-28"* about allow-removal semantics. Re-read and correct or delete |
+
+**The shape the ticket makes possible**, per config: a strict base fallback with a permissive auto-mode one, rather than one permissive setting covering both modes. That is the whole point of `4.1`'s independence — `no_match_fallback = "ask"` with `no_match_fallback_in_auto_mode = "allow"` says *"prompt me when I am watching, trust the classifier when I am not"*, which is what the blanket `allow_with_no_warnings` was standing in for.
+
+**Read `phase-4a-interpreter-lists-finding.md` before setting `undecidable_fallback` stricter than `no_match_fallback`.** That combination means *"I distrust foreign inline code"*, and the protection reaches only interpreters in `FOREIGN_EXECUTORS`; an unrecognised one takes the no-match path. Not a defect, but it makes the two settings less independent in effect than they look.
+
+**Then the per-rule keys**, which are the reason several of those TEMPORARY *rules* exist:
+
+- **The disclosure-nudge rule** (added 2026-08-28, currently an `allow` carrying `additionalContext`) becomes an `ask` with `auto_mode_behavior = "allow"`. Spec 4.2 names this as the live use case, and it was deliberately not done inside the ticket because it moves a real decision and requires regenerating the verdict corpus.
+- **Instagram-downloader's four TEMPORARY `uv run python` allows** are candidates for `program_source = "file"` — allow the script form, keep the prompt for `-c`. Exactly what the constraint was built for.
+
+**Each config changed is a decision that moves, so verify per project**: run the hook against a command the change affects, under both `default` and `auto`, and confirm the decision is what was intended. A config edit has no test suite behind it.
+
+**Finally, delete each `TEMPORARY until TOO-28` marker as its config is fixed** — including the `<TEMPORARY>` fence in toolguard's own config, whose keep-or-drop decision on the TOO-45 guards is already an open pre-push item. A marker that outlives its reason is the failure mode; leaving one after the reason is gone is worse than never writing it.
+
 ## 8. Not in this plan, deliberately
 
 Anything §5 cut (the classifier), TOO-40, TOO-18, and any extension of TOO-19's enrichment mechanism beyond adding keys to it. If a phase starts to need one of these, that is a scope conversation, not an implementation detail.
