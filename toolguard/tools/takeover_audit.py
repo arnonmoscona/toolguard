@@ -32,7 +32,7 @@ What each finding reads:
     safe configuration would train users to ignore findings.
 ``loose-no-match-fallback-in-auto-mode`` (LOW) / ``loose-undecidable-fallback-in-auto-mode`` (HIGH)
     As the two findings above, but reading ``resolved_no_match_fallback_in_auto_mode``/
-    ``resolved_undecidable_fallback_in_auto_mode`` (TOO-28) -- this tool has no
+    ``resolved_undecidable_fallback_in_auto_mode`` -- this tool has no
     ``Invocation``, so it reports what the auto-mode setting would resolve to, not
     whether a live call is actually in auto mode. Fires only when the auto value is
     both loose AND different from the base one, so an unset auto setting (which always
@@ -502,16 +502,10 @@ def audit_takeover(
             )
         )
 
-    # Invariants 6/7: loose *_in_auto_mode fallback (TOO-28).
-    #
-    # audit_takeover has no Invocation/permission_mode, so it cannot know whether a
-    # live call would actually be in auto mode -- it reports what the auto-mode
-    # setting WOULD resolve to if it were consulted. Fires only when the auto value
-    # differs from the base one (an unset auto setting always equals the base by
-    # construction -- see Configuration.resolved_no_match_fallback_in_auto_mode --
-    # so equality means "nothing new to say", already covered by invariant 4/5 when
-    # the base itself is loose). This is the gap invariant 4/5 alone cannot see: a
-    # strict base ('deny') with a loose auto override is otherwise invisible here.
+    # Invariants 6/7: loose *_in_auto_mode fallback -- see this module's own
+    # docstring for why it only fires when the auto value differs from the base
+    # one. This is the gap invariant 4/5 alone cannot see: a strict base ('deny')
+    # with a loose auto override is otherwise invisible here.
     resolved_fallback_auto = config.resolved_no_match_fallback_in_auto_mode()
     if (
         resolved_fallback_auto != resolved_fallback

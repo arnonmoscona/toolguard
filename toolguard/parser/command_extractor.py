@@ -253,7 +253,7 @@ _DEFAULT_EXECUTOR_FLAGS = _ExecutorFlags(inline_letters=frozenset("cer"))
 #: Per-executor flag specs, keyed by basename. Looked up by exact basename
 #: first, then by the interpreter family :func:`_is_foreign_executor`
 #: prefix-matches, so ``python3.13`` and ``pypy3`` reach the python spec. Also serves
-#: :func:`classify_program_source` (TOO-28 spec 4.3), which additionally looks up a
+#: :func:`classify_program_source`, which additionally looks up a
 #: :data:`BASH_FAMILY` name here -- entries never reached by :func:`_flags_for`'s other
 #: caller, :func:`_detect_foreign_inline_code`, since bash-family is never a "foreign
 #: executor" (see :data:`_BASH_FAMILY_FLAGS`).

@@ -18,7 +18,7 @@ graph does not show, and nothing would flag a future ``Configuration`` method ca
 this module.
 
 Everything this module needs about one decision arrives through a single ``context``
-parameter (TOO-28): :func:`resolve_command_permission` takes
+parameter: :func:`resolve_command_permission` takes
 :class:`~toolguard.config_types.ResolutionContext`; :func:`resolve_file_path_permission`
 takes :class:`~toolguard.config_types.FilePathResolutionContext`, the same surface narrowed
 so ``context.config`` additionally supports ``resolve_config_path`` (project-root anchoring,
@@ -205,7 +205,7 @@ def _real_group(result: LevelMatch) -> str:
     """
     The list *result*'s rule is actually written in, for a provenance/entry lookup.
 
-    ``result.decision`` is the EFFECTIVE group (TOO-28 spec 4.2/4.3: what the rule
+    ``result.decision`` is the EFFECTIVE group (what the rule
     resolves to, after an ``auto_mode_behavior`` migration); ``matched_entry_kind``
     is the ACTUAL one (the list it lives in), set by
     :func:`resolve_command_permission`/:func:`resolve_file_path_permission`, the only
@@ -282,9 +282,9 @@ def _resolve_unclamped(
     The raw more-specific-wins fold, BEFORE the TOO-19 ASK floor.
 
     Pure: *levels* already carries every hierarchy level's match, computed by the
-    caller -- including, per rule, whether an ``program_source`` guard (TOO-28 spec 4.3)
-    passed and which EFFECTIVE group an ``auto_mode_behavior`` migration (spec 4.2)
-    placed it in. Neither is decided here: a rule whose guard failed was never
+    caller -- including, per rule, whether a ``program_source`` guard passed and
+    which EFFECTIVE group an ``auto_mode_behavior`` migration placed it in.
+    Neither is decided here: a rule whose guard failed was never
     offered to the matcher in the first place (see
     :func:`resolve_command_permission`/:func:`resolve_file_path_permission`), so
     "the first level whose match is not ``None`` wins" already means what it says.
@@ -322,8 +322,8 @@ def _resolve_unclamped(
         # decision is the EFFECTIVE group (already migrated by the caller's
         # pre-match bucketing, if auto_mode_behavior applied); matched_entry_kind
         # is the rule's ACTUAL one. They differ only when a migration happened --
-        # state that plainly, in Phase 3's original wording, so the reason names
-        # both the rule that matched and the behaviour that moved it.
+        # state that plainly, so the reason names both the rule that matched and
+        # the behaviour that moved it.
         if (
             result.matched_entry_kind is not None
             and result.matched_entry_kind != result.decision
@@ -436,7 +436,7 @@ def resolve_permission_cascade(
     ``config`` object -- every level's match was already computed by the
     caller (:func:`resolve_command_permission`/:func:`resolve_file_path_permission`
     in production; a hand-built list in a test), including any
-    ``program_source``/``auto_mode_behavior`` (TOO-28 spec 4.2/4.3) effect on
+    ``program_source``/``auto_mode_behavior`` effect on
     which patterns a level's match was even attempted against. This is what
     lets the cascade -- more-specific-wins, override detection, the ASK floor
     -- be tested in isolation from real pattern matching.
@@ -471,7 +471,7 @@ def resolve_permission_cascade(
 
 def _effective_no_match_fallback(context: ResolutionContext) -> str:
     """
-    Pick ``context.config``'s no-match fallback (TOO-28): the auto-mode variant when
+    Pick ``context.config``'s no-match fallback: the auto-mode variant when
     ``context.permission_mode`` is :data:`~toolguard.config_types.AUTO_PERMISSION_MODE`,
     the base setting otherwise. Shared by :func:`resolve_command_permission` and
     :func:`resolve_file_path_permission` so the two cannot pick this differently.
@@ -483,9 +483,9 @@ def _effective_no_match_fallback(context: ResolutionContext) -> str:
 
 def _effective_kind(entry, real_kind: str, permission_mode: Optional[str]) -> str:
     """
-    The group *entry* is matched under: its own ``auto_mode_behavior`` (TOO-28 spec
-    4.2) when Claude Code's permission mode is auto and the entry declares one,
-    else *real_kind* -- the list it is actually written in.
+    The group *entry* is matched under: its own ``auto_mode_behavior`` when Claude
+    Code's permission mode is auto and the entry declares one, else *real_kind* --
+    the list it is actually written in.
     """
     if permission_mode == AUTO_PERMISSION_MODE and entry.auto_mode_behavior is not None:
         return entry.auto_mode_behavior
@@ -506,12 +506,12 @@ def _level_pattern_buckets(
     does not apply was simply never offered to the matcher -- there is no
     post-match state to unwind:
 
-    - An entry whose ``program_source`` guard (spec 4.3) fails for
+    - An entry whose ``program_source`` guard fails for
       *command_program_source* -- including when *command_program_source* is ``None``,
       as for file-path resolution, where no guard can ever be evaluated -- is
       dropped. It did not match, so it cannot suppress a sibling pattern in the
       same list, and pattern order stops mattering.
-    - Under auto mode, an entry declaring ``auto_mode_behavior`` (spec 4.2) is
+    - Under auto mode, an entry declaring ``auto_mode_behavior`` is
       bucketed by that decision (its EFFECTIVE group) rather than by the list it
       is written in (its ACTUAL group) -- see :func:`_effective_kind` -- so
       deny-first precedence and more-specific-wins apply to what the rule DOES.

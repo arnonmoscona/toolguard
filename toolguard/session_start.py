@@ -167,7 +167,7 @@ def _format_summary(
 
     if unrecognized_fallbacks:
         # Each entry names its own fallback (bad.falls_back_to) rather than a blanket
-        # "'ask'" here: the '*_in_auto_mode' settings (TOO-28) defer to their resolved
+        # "'ask'" here: the '*_in_auto_mode' settings defer to their resolved
         # base setting instead, which is not always 'ask'.
         fallback_lines = ["toolguard: UNRECOGNIZED FALLBACK SETTING --"]
         for bad in unrecognized_fallbacks:

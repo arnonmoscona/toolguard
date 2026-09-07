@@ -17,11 +17,12 @@ verdict. That is a deliberate scope boundary, not a shortfall of this trace.
 
 **This is a read-only side channel.** Nothing in the decision path reads
 this trace, and a write failure here (see :func:`log_auto_mode_trace`)
-never changes a verdict. It also does not mean auto-mode commands were
-governed more loosely than any other mode's -- toolguard does not yet vary
-its fallback behaviour by ``permission_mode`` at all (that is a later
-phase); this trace only records where the SAME fallback outcome occurred
-while auto mode was active, as a baseline for comparison once it does.
+never changes a verdict. Its firing is not itself evidence that a command
+was governed more loosely than it would be under another mode -- that
+depends on whether ``no_match_fallback_in_auto_mode``/
+``undecidable_fallback_in_auto_mode`` are actually configured to differ
+from their base settings (see :mod:`toolguard.config`); this trace records
+every fallback-decided call made while auto mode was active, regardless.
 
 Deliberately in the "observability" architecture layer (config_types.py's
 ``RuntimeVerdict``/``UnitVerdict`` live one layer up, in "config"): the
@@ -52,11 +53,10 @@ from typing import Optional
 #: entry a human decides they don't like in retrospect.
 #: - 'no_match': toolguard read the target fine; addressable by writing a rule.
 #: - 'undecidable': toolguard could not read the target at all -- NO RULE
-#:   CAN EVER COVER IT; needs the program-source constraint (spec 4.3) or
-#:   auto-mode guidance instead. This is precisely the case where the right
-#:   answer is NOT "make toolguard smarter so it can pattern this" -- spec
-#:   section 2 names that as the design smell this field exists to let a
-#:   reader rule out.
+#:   CAN EVER COVER IT; needs the program-source constraint or auto-mode
+#:   guidance instead. This is precisely the case where the right answer is
+#:   NOT "make toolguard smarter so it can pattern this" -- the design smell
+#:   this field exists to let a reader rule out.
 #: - 'parse_failure': toolguard could not read its OWN configuration; fix
 #:   the config, not a rule.
 #: - 'unknown': not determinable, so not triageable -- investigate the case

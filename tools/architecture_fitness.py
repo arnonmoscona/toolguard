@@ -1598,11 +1598,12 @@ R2_UNCHECKED_CLAUSES: Tuple[Dict[str, str], ...] = (
 # --predicates: R3 -- reason-string parsing
 # =============================================================================
 
-#: The one sanctioned reason-parsing site: the canonical fallback-marker
-#: classifier, public precisely so this pattern is not duplicated ad hoc. It is
-#: the structured contract other code calls into instead of parsing reason text
-#: itself, so it is excluded from the R3 count rather than counted as a
-#: violation -- and it is the site R3 may eventually replace outright.
+#: Named exclusion for the R3 count. ``compound.fallback_kind_for_reason`` was
+#: deleted (its structural replacement is ``RuntimeVerdict.fallback_cause``),
+#: so this entry currently excludes nothing in real code -- it is kept because
+#: ``TestFindReasonParsingSites.test_sanctioned_site_is_excluded`` pins the
+#: exclusion mechanism itself against synthetic source carrying this exact
+#: name; changing the tuple would change what that test tests.
 R3_SANCTIONED_SITES = {("compound.py", "fallback_kind_for_reason")}
 
 #: String methods that recover STRUCTURED DATA -- a substring, a position, an

@@ -1076,7 +1076,7 @@ def _maybe_trace_auto_mode(
     result: RuntimeVerdict, target: str, invocation: Invocation
 ) -> None:
     """
-    Record *result* to the auto-mode trace (TOO-28 spec 4.4), if it qualifies.
+    Record *result* to the auto-mode trace, if it qualifies.
 
     Fires only when Claude Code's own ``permission_mode`` is
     :data:`~toolguard.config_types.AUTO_PERMISSION_MODE` AND a fallback (not a matched
@@ -1386,8 +1386,8 @@ def main() -> None:
 
             # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
             # mode) is recorded alongside the decision AND, when it is the auto
-            # mode, selects the '*_in_auto_mode' fallback settings if configured
-            # (TOO-28) -- see permission_resolution.py/resolve.py.
+            # mode, selects the '*_in_auto_mode' fallback settings if configured --
+            # see permission_resolution.py/resolve.py.
             permission_mode = hook_data.permission_mode
 
             invocation = replace(

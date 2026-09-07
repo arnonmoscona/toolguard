@@ -151,7 +151,7 @@ def _fake_config(
 
         def permission_levels_with_provenance(self_inner, tool_name):
             # toolguard.permission_resolution reads this directly, and builds
-            # its per-level pattern lists from the layer's entries (TOO-28),
+            # its per-level pattern lists from the layer's entries,
             # not from the plain allow/deny tuples below -- so this fake must
             # carry a real ToolPatternLayer with entries, or every pattern
             # here is silently invisible to the matcher. A plain RuleEntry
@@ -2815,7 +2815,7 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
 
 class TestAutoModeTrace(unittest.TestCase):
     """
-    TOO-28 Phase 5: toolguard.hook._maybe_trace_auto_mode, driven through
+    toolguard.hook._maybe_trace_auto_mode, driven through
     _handle_command_tool against a real Configuration -- mirrors
     TestHandleCommandToolAuditWiring's approach for the same reason: a real
     resolver run, not a hand-built RuntimeVerdict, is what actually proves
@@ -2895,8 +2895,8 @@ class TestAutoModeTrace(unittest.TestCase):
         Then log_auto_mode_trace is called once with an AutoModeTraceEntry
             recording the exact target, the emitted 'ask' decision,
             fallback_cause='no_match' (carried structurally from
-            permission_resolution.py's own no-match branch -- round 6,
-            2026-09-06), and the invocation's permission_mode and session_id
+            permission_resolution.py's own no-match branch), and the
+            invocation's permission_mode and session_id
         """
         config = self._config(
             {
@@ -3054,8 +3054,7 @@ class TestAutoModeTrace(unittest.TestCase):
             compound where EACH leaf matches its OWN real allow rule, so
             RuntimeVerdict.matched_rule is None only because there is no
             SINGLE decider to attribute across two genuine matches
-        Then log_auto_mode_trace is never called -- this is the exact
-            ambiguity the brief's Finding 2 flagged: matched_rule=None must
+        Then log_auto_mode_trace is never called -- matched_rule=None must
             not be mistaken for "a fallback decided this" when every leaf's
             own UnitVerdict.matched_rule is populated
         """
@@ -3120,13 +3119,12 @@ class TestAutoModeTrace(unittest.TestCase):
             escape hatch rather than by any configured rule
         When _handle_command_tool resolves 'node -e "console.log(1)"'
         Then log_auto_mode_trace fires with fallback_cause='undecidable' --
-            round 6 (2026-09-06): _judge_inline_code_unit now sets
-            UnitVerdict.fallback_cause='undecidable' structurally, at the
-            point of decision, rather than the trace trying to re-derive it
-            downstream from fallback_outcome (which cannot distinguish this
-            from an ordinary no-match allow -- see the sibling test below
-            for that exact live regression, and UnitVerdict.fallback_outcome's
-            own docstring)
+            _judge_inline_code_unit sets UnitVerdict.fallback_cause='undecidable'
+            structurally, at the point of decision, rather than the trace
+            re-deriving it downstream from fallback_outcome (which cannot
+            distinguish this from an ordinary no-match allow -- see the
+            sibling test below for that exact regression, and
+            UnitVerdict.fallback_outcome's own docstring)
         """
         config = self._config(
             {
@@ -3165,10 +3163,10 @@ class TestAutoModeTrace(unittest.TestCase):
             resolve.py's own plain no_match_fallback path sets to the
             IDENTICAL value the undecidable escape hatch uses, so every
             unmatched command under this exact configuration was mislabelled
-            'undecidable'. Round 6 (2026-09-06) fixes this at the source:
-            resolve.py's _decide() now carries fallback_cause='no_match'
-            structurally, set in permission_resolution.py's own no-match
-            branch, so the trace reads it instead of re-deriving it
+            'undecidable'. This is fixed at the source: resolve.py's
+            _decide() carries fallback_cause='no_match' structurally, set in
+            permission_resolution.py's own no-match branch, so the trace
+            reads it instead of re-deriving it
         """
         config = self._config(
             {
@@ -3269,9 +3267,9 @@ class TestAutoModeTrace(unittest.TestCase):
 class TestClassifyFallbackCause(unittest.TestCase):
     """
     toolguard.hook._classify_fallback_cause in isolation, against
-    hand-built RuntimeVerdicts/Invocations. TOO-28 Phase 5 round 6
-    (2026-09-06): the cause is now carried on RuntimeVerdict.fallback_cause,
-    set structurally at the point of decision in permission_resolution.py/
+    hand-built RuntimeVerdicts/Invocations. The cause is carried on
+    RuntimeVerdict.fallback_cause, set structurally at the point of
+    decision in permission_resolution.py/
     resolve.py/compound.py (see test_resolve.py/test_compound.py/
     test_permission_resolution.py for that propagation) -- this class tests
     only hook.py's own remaining logic: reading that field, and the one

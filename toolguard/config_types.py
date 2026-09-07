@@ -15,7 +15,7 @@ from typing import List, Mapping, Optional, Protocol, Tuple
 from toolguard.rule_entry import RuleEntry, _strip_tool_wrapper
 
 #: Claude Code's own auto permission mode -- the one value the two
-#: ``*_fallback_in_auto_mode`` settings (TOO-28) and the Phase 5 trace gate care about.
+#: ``*_fallback_in_auto_mode`` settings and the auto-mode trace gate care about.
 #: Lives here (config layer), not in ``hook.py`` (runtime layer): the engine layer
 #: (``permission_resolution.py``, ``resolve.py``) may import config but never runtime.
 AUTO_PERMISSION_MODE = "auto"
@@ -435,8 +435,8 @@ class LevelMatch:
             genuine ``str`` when a ``LevelMatch`` is constructed at all.
         matched_entry_kind: The rule's ACTUAL group (``'allow'``/``'deny'``/``'ask'``)
             -- the list it is really written in, as opposed to ``decision``, its
-            EFFECTIVE group after an ``auto_mode_behavior`` migration (TOO-28 spec
-            4.2). The two are the same value except when a rule has migrated groups,
+            EFFECTIVE group after an ``auto_mode_behavior`` migration.
+            The two are the same value except when a rule has migrated groups,
             which is why this is a separate field rather than derived from
             ``decision``: :func:`~toolguard.permission_resolution._matched_rule_lookup`
             keys provenance/entry lookups off this field, never off ``decision``, so a
@@ -754,7 +754,7 @@ class ResolutionConfig(Protocol):
 
     def resolved_no_match_fallback_in_auto_mode(self) -> str:
         """
-        Return the effective ``no_match_fallback_in_auto_mode`` policy (TOO-28): the
+        Return the effective ``no_match_fallback_in_auto_mode`` policy: the
         no-match handoff to trust when Claude Code's own ``permission_mode`` is
         ``'auto'``, in place of :meth:`resolved_no_match_fallback`.
 
@@ -842,7 +842,7 @@ class ResolveConfig(ResolutionConfig, Protocol):
 
     def resolved_undecidable_fallback_in_auto_mode(self) -> str:
         """
-        Return the effective ``undecidable_fallback_in_auto_mode`` policy (TOO-28): the
+        Return the effective ``undecidable_fallback_in_auto_mode`` policy: the
         undecidable-command handoff to trust when Claude Code's own ``permission_mode``
         is ``'auto'``, in place of :meth:`resolved_undecidable_fallback`.
 
@@ -881,7 +881,7 @@ class FilePathResolutionConfig(ResolutionConfig, PathAnchoring, Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Context Protocols (TOO-28) -- the (config, tool_name, extended_syntax)
+# Context Protocols -- the (config, tool_name, extended_syntax)
 # triple an engine-layer entry point needs about ONE decision, expressed one
 # level out from the Config Protocols above rather than replacing them: "I
 # need something that gets me a ResolutionConfig", not "I need a
@@ -899,7 +899,7 @@ class ResolutionContext(Protocol):
     Attributes:
         tool_name: The governed-tool identity to resolve against.
         extended_syntax: Whether ``[regex]``/``[glob]``/``[native]`` prefixes are honoured.
-        permission_mode: Claude Code's own permission mode for this call (TOO-28), e.g.
+        permission_mode: Claude Code's own permission mode for this call, e.g.
             ``'default'`` or :data:`AUTO_PERMISSION_MODE`, or ``None`` when unknown --
             selects between a fallback setting and its ``'*_in_auto_mode'`` counterpart.
     """

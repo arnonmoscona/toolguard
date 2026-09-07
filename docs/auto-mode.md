@@ -1,14 +1,71 @@
 # Auto-mode with toolguard
 
-**Auto-mode** here means Claude Code's own unattended modes -- `acceptEdits`,
-`bypassPermissions`, or similar -- where Claude Code stops asking for permission on its own,
-regardless of what your native `settings.json` allow/deny rules say. This page is about
-running toolguard *underneath* that, not toolguard's own [Takeover Mode](takeover-mode.md)
-(a related but different mechanism -- see [How this differs from Takeover Mode](#how-this-differs-from-takeover-mode)).
+**Auto-mode** here means Claude Code's own `auto` permission mode specifically -- one of six
+mode values (`default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`; see
+[Choose a permission mode](https://code.claude.com/docs/en/permission-modes)) and the only one
+with a second model, the classifier, reviewing actions in place of a prompt. toolguard's
+`*_in_auto_mode` settings key on that exact value (`permission_mode == "auto"`) and do nothing
+under any other mode.
+
+**Running `acceptEdits`, `dontAsk`, or `bypassPermissions` (`--dangerously-skip-permissions`)
+instead?** None of those has a classifier, so the `_in_auto_mode` settings on this page have
+nothing to hand off to and never fire there -- toolguard's own fallback decision is governed
+by the BASE `no_match_fallback`/`undecidable_fallback` settings, exactly as in an interactive
+session. Configure the base settings directly instead (see [Configuration: No-match
+fallback](configuration.md#no-match-fallback) and [Undecidable
+fallback](configuration.md#undecidable-fallback)) if you want the same review-with-a-warning
+tradeoff this page recommends for `auto` mode.
+
+**What does NOT change with the mode is whether toolguard's own `ask` stops the call. It
+does, in every mode** -- measured against Claude Code 2.1.260 on 2026-09-07 by driving a real
+session in each one, with a control confirming the same command ran under `bypassPermissions`
+when the rule allowed it. `dontAsk` denies outright rather than waiting for an answer, which
+is fail-closed by a different route; the rest stop and wait. So none of these modes is a way
+to get past a toolguard `ask`, and the choice between them is about Claude Code's *own*
+prompting, not about toolguard's authority. Re-run the check after a Claude Code upgrade:
+[`test/manual/ask_binding_probe.sh`](../test/manual/README.md).
+
+This page is about running toolguard *underneath* `auto` mode, not toolguard's own
+[Takeover Mode](takeover-mode.md) (a related but different mechanism -- see [How this differs
+from Takeover Mode](#how-this-differs-from-takeover-mode)).
 
 > Read this whole page before turning this on. It describes a real, named, supportable
 > configuration -- but it trades away real protection for unattended operation, and you
 > should make that trade with open eyes.
+
+## Division of labour: toolguard vs. auto-mode guidance
+
+Once Claude Code enters `auto` mode, two different mechanisms can gate a call: toolguard's
+rules, and Claude Code's own classifier (see
+[Choose a permission mode](https://code.claude.com/docs/en/permission-modes)). Under the
+OTHER modes that reduce or remove Claude Code's own prompting (`acceptEdits`, `dontAsk`,
+`bypassPermissions`), there is no classifier at all, so toolguard's rules are the only side
+of this table that is present -- see the top of this page for what to configure there
+instead. They decide by different means, and each is strong exactly where the other is
+blind:
+
+| | Decides by | Strong where | Blind where |
+|---|---|---|---|
+| **toolguard** | Exact pattern match against configured rules | Anything expressible as a rule -- exact, testable, versioned, auditable | Anything it cannot parse or pattern: foreign inline code, heredocs, undecomposable control structures |
+| **Auto-mode guidance** (the classifier) | Semantic judgement of the pending action | Undecomposable blobs, intent, novel shapes no rule was ever written for | Exactness, repeatability, auditability -- its calls are not versioned rules you can review offline |
+
+**These are complementary halves with inverted strengths, not two implementations of one
+control.** toolguard's blind spot is constitutive, not a missing feature: a compound command
+it cannot decompose, a heredoc, foreign inline code, a script whose contents it never sees.
+The [ASK floor](configuration.md#undecidable-fallback) and `undecidable_fallback` exist
+precisely to *announce* that blind spot -- toolguard saying "I cannot read this," rather than
+guessing.
+
+Every `_in_auto_mode` setting on this page, and `auto_mode_behavior` on an individual rule
+(see [Configuration: Per-rule auto-mode behavior](configuration.md#per-rule-auto-mode-behavior)),
+is therefore a **handoff point**, not an "auto-mode variant" of a base setting: it declares how
+much you trust the classifier for one specific class of case toolguard cannot decide on its
+own. Setting one does not make toolguard smarter about auto mode.
+
+**The design smell to watch for: "make toolguard smarter so it can handle this."** If what is
+being asked for requires reading intent rather than matching a pattern, the answer is trusting
+the classifier for that case -- not a cleverer rule. toolguard's exactness is the property
+worth keeping; stretching it to cover judgement calls trades that away.
 
 ## The honest tradeoff
 
@@ -84,6 +141,33 @@ afterward. This is a **detective control for the unmatched case, not a preventiv
    Code is prompting natively again.)
 
 Toolguard's logs also record Claude Code's own `permission_mode` for every decision. As of the `_in_auto_mode` settings above, this is no longer purely diagnostic: when one of them is configured and the recorded mode is auto, it is also what decided the two fallback cases those settings cover. It remains diagnostic-only for everything else the log records, and you can audit exactly which mode a given command ran under after the fact.
+
+## The auto-mode trace log
+
+Separately from the daily decision log above, every time a call resolves through a fallback
+(`no_match_fallback`/`undecidable_fallback`, in either their base or `_in_auto_mode` form)
+while `permission_mode` is auto, toolguard appends one record to
+`logs/toolguard-automode-YYYY-MM-DD.jsonl`. It is a **read-only side channel**: nothing in the
+decision path reads it, and a write failure here never changes a verdict.
+
+Each record's `fallback_cause` is a **triage code** -- each value implies a different
+response to a case you decide, in retrospect, you do not like:
+
+- `"no_match"` -- toolguard read the command fine; no rule covered it. Addressable by writing
+  a rule.
+- `"undecidable"` -- toolguard could not read the target at all. No rule can ever cover this;
+  the [program-source constraint](configuration.md#program-source-constraint) or an
+  `_in_auto_mode` handoff setting are the deliberate ways to loosen it instead.
+- `"parse_failure"` -- toolguard could not read its own configuration. Fix the config, not a
+  rule.
+- `"unknown"` -- not determinable from the information available (most often a compound
+  command whose several allowed leaves disagree on a cause). Investigate the case rather than
+  assuming either of the answers above.
+
+**What this log does not answer.** It is written from a `PreToolUse` hook, so it records what
+toolguard itself deferred to a fallback -- never whether Claude Code's own auto-mode
+classifier subsequently allowed or blocked the call. Correlating the two means reading both
+this log and Claude Code's own audit trail.
 
 ## How this differs from Takeover Mode
 

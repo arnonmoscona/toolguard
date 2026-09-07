@@ -1006,7 +1006,7 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
 class TestUndecidableFallbackAutoMode(unittest.TestCase):
     """
     resolve_bash_permission_detailed() consults undecidable_fallback_in_auto_mode
-    (TOO-28) instead of undecidable_fallback when Invocation.permission_mode is the
+    instead of undecidable_fallback when Invocation.permission_mode is the
     auto mode, and leaves the base setting's own behaviour untouched otherwise.
     """
 
@@ -1066,8 +1066,7 @@ class TestUndecidableFallbackAutoMode(unittest.TestCase):
         When a foreign inline-code command is resolved under
             permission_mode='auto'
         Then the decision is 'deny' -- the SAME as under any other mode --
-            proving an unset auto-mode setting changes nothing (spec section
-            4.1's inertness requirement)
+            proving an unset auto-mode setting changes nothing
         """
         config = self._config(undecidable_fallback="deny", allow=["python3 -c:*"])
         cmd = 'python3 -c "import os"'
@@ -1088,11 +1087,10 @@ class TestUndecidableFallbackAutoMode(unittest.TestCase):
 class TestPerRuleAutoModeBehaviorInACompound(unittest.TestCase):
     """
     A compound command's leaves each resolve independently through
-    resolve_command_permission (TOO-28 spec 4.2's per-rule seam), then
-    _combine_strictest picks/combines ALREADY-DECIDED verdicts -- it never re-derives a
-    decision from a rule match. So a per-leaf auto_mode_behavior needs no separate
-    handling here; these tests are the sibling-sweep confirmation of that (brief's own
-    unverified claim #5), not new production code.
+    resolve_command_permission, then _combine_strictest picks/combines
+    ALREADY-DECIDED verdicts -- it never re-derives a decision from a rule match.
+    So a per-leaf auto_mode_behavior needs no separate handling here; these tests
+    confirm that rather than adding new production behaviour.
     """
 
     def _resolve(self, config, command, permission_mode):

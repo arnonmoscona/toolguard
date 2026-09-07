@@ -47,7 +47,7 @@ PATTERN_KEY = "match"
 ADDITIONAL_CONTEXT_KEY = "additionalContext"
 
 #: The enrichment key naming this entry's own decision when Claude Code's
-#: permission mode is auto (TOO-28 spec 4.2) -- e.g. an ``ask`` rule declaring
+#: permission mode is auto -- e.g. an ``ask`` rule declaring
 #: ``auto_mode_behavior = "allow"`` to widen, or ``"deny"`` to narrow. Not an
 #: "override": see :mod:`toolguard.permission_resolution`'s own docstring for
 #: why that word is reserved for allow-over-deny conflict detection. One
@@ -63,7 +63,7 @@ _VALID_AUTO_MODE_BEHAVIOR_VALUES = frozenset(
 )
 
 #: The enrichment key constraining this entry to one visibility of executable
-#: material (TOO-28 spec 4.3) -- e.g. ``program_source = "file"`` so a rule only
+#: material -- e.g. ``program_source = "file"`` so a rule only
 #: matches ``python script.py``, not ``python -c "..."``. A guard, not a
 #: mapping: a mismatched command makes the rule not apply, same as if it had
 #: not matched at all. See :func:`toolguard.parser.command_extractor.classify_program_source`.

@@ -12,6 +12,38 @@ permalink: toolguard/too-28/too-28-implementation-plan
 
 **Status: DRAFT FOR REVIEW.** Written 2026-09-04 against `TOO-28 specification.md` (214 lines, signed off the same day). The spec settles *what and why*; this settles *how*, and nothing here may quietly change scope — where I think the spec is wrong, it is flagged in §7 rather than silently corrected.
 
+---
+
+## WHERE THIS STANDS — updated 2026-09-07, read this first
+
+**Committed:** Phase 1 (invocation context, four rounds), Phase 5 (auto-mode trace), Phase 2 + the `fallback_outcome` rename + the decision-literal sweep (one commit), Phase 3 (per-rule auto-mode behaviour), Phase 4a (the interpreter-lists finding — no code), Phase 4b+4c (program-source constraint, which also corrected a Phase 3 defect).
+
+Phase 6 + Phase 7 (documentation, then the comment cleanup) landed together in one commit on 2026-09-07, at Arnon's instruction.
+
+**Remaining:** the pre-push checklist, then **§7.5** — fixing the five real configs, which is what makes the ticket worth anything.
+
+**Phase 6/7 found three doc defects that no phase had been looking for, all pre-existing and all fail-silent.** Worth recording because the pattern is the same each time — a sentence that was true when written and was falsified by a later change nobody re-read it against:
+
+1. `docs/auto-mode.md` defined "auto-mode" as `acceptEdits`/`bypassPermissions`/"or similar". toolguard keys on `permission_mode == "auto"` by exact equality, so the page's own recommended setting would silently never fire for the readers it was addressing. Phase 2 put the recommendation onto a definition written earlier. Fixed, and propagated to `agent-map.md` and `README.md`.
+2. `toolguard/auto_mode_trace.py` claimed toolguard "does not yet vary its fallback behaviour by `permission_mode` at all (that is a later phase)". True when Phase 5 was written; false once Phase 2 landed. **The phases ran out of order (1, 5, 2, 3, 4), which makes this a systematic hazard rather than one bad comment.**
+3. `tools/architecture_fitness.py`'s `R3_SANCTIONED_SITES` comment described the named function as "the structured contract other code calls into". The function was deleted in an earlier ticket. The tuple is kept — a test pins the exclusion mechanism against that exact name — but the comment now says so.
+
+**DO NOT READ THE SEALED ESTIMATES.** `~/dev-process/predictions/toolguard/TOO-28/raw-estimate.json` and `informed-estimate.json` are sealed, validated, and unread by anyone. Reading either destroys the measurement. They are scored only after the work lands, against `git diff --name-only TOO-28-start-of-work..HEAD`. See `RESUME.md` beside them, which also records that the outcome must carry `scope_change_during_planning: "up"` and cause `R`, because the Phase 1 refactor entered *after* the raw estimate was sealed.
+
+**Open items not owned by any phase:**
+
+- Converting this repo's disclosure-nudge rule to `auto_mode_behavior` — §7.5, deliberately not done inside the ticket (moves a real decision, needs corpus regeneration).
+- The within-group specificity question: `match_command` returns the **first hit by source order**, not most-specific-wins. Pre-existing, unrelated to TOO-28, and changing it would move real decisions. Its own ticket.
+- The permissions **section-name** literals (`"allow"`/`"deny"`/`"ask"` as *which list*, across 14 files) — deliberately left by the decision-literal sweep, since merging them with the decision vocabulary would conflate two things that share a spelling.
+- The reason-text `.replace()` in `permission_resolution._reason_naming_real_group` — a known compromise, tested and guarded; the proper fix renders the clause where the real group is known and needs `permissions.py`.
+- **CLOSED by measurement, 2026-09-07 — and the answer refuted me.** I argued that a toolguard `ask` probably does not bind under `bypassPermissions`, reasoning from an omission: Claude Code's *actions no mode auto-approves* list names a native `ask` **rule** and a `PreToolUse` hook's `"allow"`, but never a hook-forced prompt, while the mode itself *"disables permission prompts and safety checks"*. On that basis I had `docs/security.md`'s guarantee narrowed. **The test says the guarantee was right and I was wrong.** Driving a real `claude -p` per mode against Claude Code 2.1.260: a rule resolving to ASK stopped the command under `default`, `acceptEdits`, `dontAsk` **and `bypassPermissions`**, with a control confirming the same command ran under `bypassPermissions` when the rule allowed it. Now a committed manual test, `test/manual/ask_binding_probe.sh`, with the result and its limits in the README beside it.
+
+  **Two lessons worth more than the answer.** First: *an omission from a documentation list is not evidence about behaviour* — I treated absence as a signal and overrode a correct claim on it. Second: the harness's **first** run produced a clean, plausible, entirely false result, because the rules were written at the top level of `toolguard_hook.toml` instead of under `[permissions]`, where they are silently inert. All three cases agreed, no rule had matched in any of them. What caught it was printing what toolguard actually decided beside whether the command ran — provenance emitted from inside the measurement, which is the same fix this project already recorded for the isolation-instrument failure.
+
+**Method that has been working, worth continuing:** brief → subagent → *verify the claims myself, not just the numbers* → live end-to-end run → send back if wrong. Every defect found in Phases 3–4 passed a green suite and a clean report; each was caught by running the case, and twice by running a **control** (the same config with the feature removed) rather than by reading code.
+
+---
+
 **The raw touch-set estimate was sealed before this document existed** and has not been read by anyone. This plan is therefore uncontaminated by it, and it is the document the **informed** estimate will be taken against.
 
 ---

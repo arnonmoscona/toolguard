@@ -346,7 +346,7 @@ class TestFloorCoversFilePathTools(unittest.TestCase):
 
 class TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting(unittest.TestCase):
     """
-    The TOO-19 parse-failure ASK floor (spec section 8) must hold for every
+    The parse-failure ASK floor must hold for every
     fallback-shaped setting, not just today's two. Iterates
     ``toolguard.config._FALLBACK_SETTINGS`` -- the single declared registry also read by
     ``Configuration.unrecognized_fallback_settings`` -- instead of naming settings by
@@ -402,7 +402,7 @@ class TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting(unittest.TestC
 
 class TestNoMatchFallbackAutoMode(unittest.TestCase):
     """
-    resolve_command_permission() consults no_match_fallback_in_auto_mode (TOO-28)
+    resolve_command_permission() consults no_match_fallback_in_auto_mode
     instead of no_match_fallback when Invocation.permission_mode is the auto mode,
     and leaves the base setting's own behaviour untouched otherwise.
     """
@@ -484,9 +484,8 @@ class TestNoMatchFallbackAutoMode(unittest.TestCase):
             permission_mode='auto'
         When a plain no-match command is resolved
         Then it is ALLOWED -- governed only by no_match_fallback_in_auto_mode,
-            proving the two auto-mode settings do not couple (spec section
-            4.1's independence requirement; the undecidable side of the same
-            config is exercised in
+            proving the two auto-mode settings do not couple (the undecidable
+            side of the same config is exercised in
             test_resolve.TestUndecidableFallbackAutoMode)
         """
         config = _config(
@@ -513,7 +512,7 @@ class TestNoMatchFallbackAutoMode(unittest.TestCase):
 
 class TestPerRuleAutoModeBehavior(unittest.TestCase):
     """
-    A matched rule's own ``auto_mode_behavior`` (TOO-28 spec 4.2) replaces its list's
+    A matched rule's own ``auto_mode_behavior`` replaces its list's
     decision only when ``permission_mode == 'auto'``, applied AFTER provenance and
     ``additionalContext`` resolve against the rule's REAL matched decision -- so both
     still attribute to the rule that actually decided, even though the effective
@@ -952,12 +951,12 @@ class TestHardDenyRegressionGuards(unittest.TestCase):
 
 class TestAutoModeBehaviorUnderParseFailure(unittest.TestCase):
     """
-    TOO-19 spec section 8: the parse-failure ASK floor sits above rule matching
+    The parse-failure ASK floor sits above rule matching
     (:func:`~toolguard.permission_resolution._apply_ask_floor`) and is unconditional --
     a per-rule ``auto_mode_behavior`` cannot escape it, the same as no other
     fallback-shaped setting can (see
     ``test.unit.test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting``,
-    the Phase 2 enumerating test this is the per-rule sibling of).
+    the enumerating test this is the per-rule sibling of).
     """
 
     def test_widened_allow_is_still_floored_to_ask_under_a_parse_failure(self):
@@ -991,7 +990,7 @@ class TestAutoModeBehaviorUnderParseFailure(unittest.TestCase):
 
 class TestProgramSourceGuard(unittest.TestCase):
     """
-    A matched rule's ``program_source`` (TOO-28 spec 4.3) constrains it to one
+    A matched rule's ``program_source`` constrains it to one
     visibility of executable material. A mismatch makes the WHOLE LEVEL
     unmatched -- the cascade falls through to the next, less-specific level,
     same as the existing no-match branch (``if result is None: continue``) --
@@ -1212,7 +1211,7 @@ class TestProgramSourceGuard(unittest.TestCase):
 
 class TestProgramSourceGuardNeverAppliesToFilePathResolution(unittest.TestCase):
     """
-    ``program_source`` classifies Bash/MCP-terminal commands only (TOO-28 spec 4.3);
+    ``program_source`` classifies Bash/MCP-terminal commands only;
     ``resolve_file_path_permission`` never computes a classification. A rule that
     carries the key on a Read/Write/Edit pattern must be INERT, not a silent change
     in what the rule matches -- an inert allow is a nuisance; a fail-open deny is a

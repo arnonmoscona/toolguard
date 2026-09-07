@@ -228,7 +228,7 @@ def resolve_bash_permission_detailed(
     substitution) that cannot be safely decomposed are floored per
     ``config.resolved_undecidable_fallback()`` (or its auto-mode counterpart,
     ``resolved_undecidable_fallback_in_auto_mode()``, when
-    ``invocation.permission_mode`` is the auto mode -- TOO-28) -- see
+    ``invocation.permission_mode`` is the auto mode) -- see
     :func:`toolguard.compound.judge_unit`.
 
     Allow-over-deny overrides discovered on any sub-command are returned so

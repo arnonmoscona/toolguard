@@ -191,6 +191,34 @@ settings (e.g. `Bash(~/projects/**)`) that you want toolguard to disregard so yo
 **CRITICAL**: If toolguard fails to run (e.g., a Python error or missing dependency), Claude
 Code sees only the blanket allow patterns and will execute ANY command without restriction.
 
+**This is narrower than stated above while Claude Code's own auto mode is active (checked
+against the docs, 2026-09-07).** The warning assumes a blanket `Bash(*)` allow, once
+installed, always resolves a command immediately with nothing left to review. That holds in
+Claude Code's default (manual) mode, but auto mode drops exactly this class of rule on entry:
+
+> On entering auto mode, broad allow rules that grant arbitrary code execution are dropped:
+>
+> * Blanket `Bash(*)` or `PowerShell(*)`
+> * Wildcarded interpreters like `Bash(python*)`
+> * Package-manager run commands
+> * `Agent` allow rules
+> * `Monitor` allow rules, because Claude Code runs Monitor commands through the shell
+>
+> Narrow rules like `Bash(npm test)` stay in effect. Claude Code restores the dropped rules
+> when you leave auto mode.
+> -- [Choose a permission mode](https://code.claude.com/docs/en/permission-modes)
+
+So if toolguard fails while Claude Code is in auto mode, a dropped `Bash(*)` allow does not
+resolve a Bash call outright -- it falls through to Claude Code's own classifier, which still
+reviews it. The direction is safe (auto mode routes more Bash calls to review, not fewer), but
+"will execute ANY command without restriction" is not accurate for Bash while auto mode is
+active. It remains accurate for takeover mode's original target -- Claude Code's default
+(manual) mode -- and for `bypassPermissions` mode, where allow rules have no effect (per the
+same fetch: everything runs there regardless, so the blanket allow was never the thing
+standing between the model and the command). Deny rules are the one exception that blocks in
+every mode, including `bypassPermissions` -- native deny rules left in place still hold even
+when toolguard is down.
+
 **To mitigate this risk**:
 
 1. **Test thoroughly** before enabling takeover mode.

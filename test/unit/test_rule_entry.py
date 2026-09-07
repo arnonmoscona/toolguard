@@ -1168,9 +1168,8 @@ class TestModuleConstants(unittest.TestCase):
         Given the KNOWN_ENRICHMENT_KEYS constant
         When inspected
         Then it is a frozenset holding exactly "additionalContext",
-             "auto_mode_behavior" (TOO-28 spec 4.2) and "program_source"
-             (TOO-28 spec 4.3) -- "match" (PATTERN_KEY) is never itself an
-             enrichment key
+             "auto_mode_behavior" and "program_source" -- "match"
+             (PATTERN_KEY) is never itself an enrichment key
         """
         self.assertEqual(
             KNOWN_ENRICHMENT_KEYS,
@@ -1353,7 +1352,7 @@ class TestAdditionalContext(unittest.TestCase):
 
 
 class TestAutoModeBehavior(unittest.TestCase):
-    """The `auto_mode_behavior` enrichment key (TOO-28 spec 4.2): registry entry, valid-value constraint, and the `RuleEntry.auto_mode_behavior` accessor."""
+    """The `auto_mode_behavior` enrichment key: registry entry, valid-value constraint, and the `RuleEntry.auto_mode_behavior` accessor."""
 
     def test_auto_mode_behavior_is_a_known_enrichment_key(self):
         """
@@ -1453,7 +1452,7 @@ class TestAutoModeBehavior(unittest.TestCase):
 
 
 class TestProgramSource(unittest.TestCase):
-    """The `program_source` enrichment key (TOO-28 spec 4.3): registry entry, valid-value constraint, and the `RuleEntry.program_source` accessor."""
+    """The `program_source` enrichment key: registry entry, valid-value constraint, and the `RuleEntry.program_source` accessor."""
 
     def test_program_source_is_a_known_enrichment_key(self):
         """

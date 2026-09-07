@@ -11,6 +11,128 @@ tags:
 tags: [task-memory, TOO-28]
 ---
 
+# TOO-28 Phases 6+7 -- coder task recall (CURRENT; everything below down to the next '---'
+divider that starts an older '## TOO-28 Phase' section is STALE from earlier sessions --
+write_note overwrite does not take effect for this permalink, known basic-memory quirk, so
+prepend is used)
+
+## Ticket: TOO-28, Phases 6 + 7
+
+Brief: `toolguard-memories/TOO-28/brief-phase67.md` (validated: all 5 slots present and filled).
+
+Both phases in one commit, at Arnon's instruction. Do 6 first (its claims-must-be-true rule
+applies to what Phase 6 writes too). No git write ops -- leave tree dirty, describe it.
+
+### Phase 6 -- documentation only, no behaviour change
+
+Seven items, all in `docs/` (+ possibly README.md/llms.txt/AGENTS.md pointers). Out of scope:
+`docs/install.md`, anything under `skills/` (that's TOO-77).
+
+1. Division of labour (toolguard=exact pattern match, strong/blind table; auto-mode=semantic
+   judgement, inverted strengths). Complementary halves, NOT two implementations of one control.
+   toolguard's blind spot is constitutive by design (ASK floor / undecidable_fallback announce
+   it). Verify not written already: check docs/security.md (644 lines) and
+   docs/architecture-as-built.md (557 lines) which brief author did not read.
+2. Design smell named explicitly: "make toolguard smarter so it can handle X" -> wrong, answer
+   is auto-mode guidance not a cleverer rule.
+3. Handoff framing already written (docs/configuration.md:669, Phase 3) -- VERIFY, don't
+   rewrite; cross-link rather than duplicate.
+4. Early pointer somewhere orientation-first (README.md / docs/quickstart.md /
+   docs/agent-map.md -- decide which, say why).
+5. Takeover-mode inaccuracy under auto mode: docs/takeover-mode.md assumes "native permits
+   everything, toolguard is only gate" -- false under auto mode since auto mode drops broad
+   native allow rules on entry. MUST fetch code.claude.com/docs/en/permission-modes and
+   permissions.md in-session before writing this (native-fidelity-claims.md rule). Direction is
+   safe (more actions reach classifier not fewer) but doc is inaccurate.
+6. Auto-mode trace completely undocumented: `logs/toolguard-automode-<date>.jsonl` (Phase 5).
+   Document: what it records, 4 fallback_cause values AS TRIAGE CODES, that it's a read-only
+   side channel (write failure never changes verdict), what it does NOT answer (PreToolUse hook,
+   never sees auto-mode classifier's own verdict). Source: toolguard/auto_mode_trace.py
+   docstring -- but READ PHASE 7 FIRST, part of it is stale (confirmed false: line 21, "does
+   not yet vary fallback behaviour by permission_mode" -- Phase 2 shipped
+   resolved_no_match_fallback_in_auto_mode and resolved_undecidable_fallback_in_auto_mode).
+7. One line for undecidable_fallback: protection reaches only interpreters in
+   FOREIGN_EXECUTORS; an interpreter not on that list (lua, deno, bun, julia) gets no ASK floor,
+   reaches no_match_fallback instead. Code already documents this in FOREIGN_EXECUTORS' own
+   comment; docs don't.
+
+### Phase 7 -- comment/docstring cleanup in *.py
+
+Scope: `git diff TOO-28-start-of-work..HEAD -- '*.py'` (46 files, 5459 insertions). NOT
+test/verdict_corpus/ fixtures (frozen goldens). NOT comments outside the diff (general sweep is
+widening).
+
+7a: delete pure scaffolding comments (mid-refactor notes with no reader now). Plan's inventory
+(hook.py:1016,1103,1271,1275) is STALE -- grep confirmed empty already. Re-derive, don't trust
+plan.
+
+7b: trim survivors on 3 questions: (1) has a reader after work lands? (2) concise per
+~/.claude/rules/comments.md? (3) is claim still TRUE? -- HIGHEST YIELD, because phases landed
+out of order (1,5,2,3,4), so Phase 5 comments may predate Phase 2 features. Confirmed false:
+auto_mode_trace.py:21 (see above). Find others via same mechanism (not just grep "not yet"/
+"later phase" -- that's incomplete).
+
+Two carried dispositions (don't re-decide):
+- invocation.py module docstring: keep the RULE ("explicit argument, not ambient singleton"),
+  drop the ARGUMENT (in-process-corpus, eight-console-scripts) -- belongs in ticket not code.
+- test/unit/test_architecture.py:42: keep substance (why allow-list is empty / stops importing
+  config into it), drop ticket reference.
+
+~30 TOO-28 references in *.py -- judge each; most become plain rule statement or go.
+
+Bounded extra: tools/architecture_fitness.py:1606 R3_SANCTIONED_SITES references
+("compound.py", "fallback_kind_for_reason") which no longer exists per
+test/unit/test_compound_resolve_seam.py:410 ("the now-deleted"). NOT inert:
+test/unit/test_architecture_fitness.py:1884 builds synthetic source to exercise that entry.
+Judgement call -- if removing changes what a test means, STOP and report, don't adjust test.
+
+### Widening: NOT authorised except (a) fixing own breakage, (b) correcting a doc statement
+found factually false while writing nearby prose (report separately).
+
+### Findings carried forward
+1. Phase 4a's "unknown interpreter gap" finding RETRACTED except item 7. Unrecognised
+   interpreter DOES reach no_match_fallback correctly -- that's what fallback is for. Don't
+   document a gap; document scope of what undecidable_fallback covers.
+2. Phase 0 status (does hook allow skip auto-mode classifier) UNSETTLED -- belongs to TOO-77.
+   Do NOT write a docs sentence answering it either way; if named at all, name as open.
+3. Handoff framing + settings reference already written (Phases 2,3,4) -- verify + cross-link,
+   don't duplicate.
+4. Baseline taken 2026-09-07 at bd4f895: suite "Ran 4130 tests" / OK; ruff check clean; corpus
+   --verify --strict-prose "OK: no differences" at 6401 in-process / 61 end-to-end; 3
+   architecture_fitness.py checks pass; 8 console entry points load.
+
+### Native docs fetched 2026-09-07 (this session)
+
+From https://code.claude.com/docs/en/permission-modes, "How the classifier evaluates actions"
+accordion:
+
+> On entering auto mode, broad allow rules that grant arbitrary code execution are dropped:
+> * Blanket `Bash(*)` or `PowerShell(*)`
+> * Wildcarded interpreters like `Bash(python*)`
+> * Package-manager run commands
+> * `Agent` allow rules
+> * `Monitor` allow rules, because Claude Code runs Monitor commands through the shell
+>
+> Narrow rules like `Bash(npm test)` stay in effect. Claude Code restores the dropped rules
+> when you leave auto mode.
+
+Confirms brief's item 5 premise and "direction is safe" claim.
+
+### TDD note
+TDD NOT required -- both phases behaviour-neutral by construction. Corpus is the load-bearing
+check. If a new test seems needed -> stop and report, out of scope.
+
+### Constraints
+uv run python, unittest not pytest, stdlib-only runtime, PEG grammar unchanged. Disclosure
+rule for authored Bash. No git write ops. Read ~/.claude/rules/comments.md before writing/
+trimming any comment. .claude/rules/native-fidelity-claims.md mandatory for item 5.
+
+---
+
+---
+tags: [task-memory, TOO-28]
+---
+
 # TOO-28 Phase 2 -- two independent auto-mode fallbacks (CURRENT; everything below down to
 the next '---' divider that starts an older '## TOO-28 Phase 5' or similar section is STALE
 from earlier sessions -- this note's write_note overwrite does not take effect for this

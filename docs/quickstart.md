@@ -170,7 +170,8 @@ similarity/duplicate detection.
 
 If you also run Claude Code itself in an auto-accept / bypass-permissions mode, see
 [Auto-mode with toolguard](auto-mode.md) -- toolguard is still worth registering in that
-setup, but the honest tradeoffs are different enough to deserve their own page.
+setup, but the honest tradeoffs, and where toolguard's rules hand off to Claude Code's own
+classifier, are different enough to deserve their own page.
 
 ## Uninstalling
 

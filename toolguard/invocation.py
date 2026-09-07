@@ -4,28 +4,19 @@ The facts one ``PreToolUse`` evaluation knows about itself, carried as one value
 ``hook.py`` loads several things once per run -- the resolved configuration, the
 environment config, the governed-tool list, the parsed hook event, the agent label and
 Claude Code's own permission mode -- and then passes some of them down and drops others.
-Which ones a given function received says more about when it was written than about what
-it needs. TOO-28 names that set instead, so a new invocation-wide fact touches the load
-point and the use points and nothing in between.
+This class names that set instead, so a new invocation-wide fact touches the load point
+and the use points and nothing in between.
 
-**An explicit argument, deliberately, not an ambient singleton.** The tempting shape is a
-module-level instance any function can reach, justified by "each hook evaluation is its
-own process". That is false today, not merely in future: ``tools/corpus_build.py`` drives
-a fast in-process corpus of thousands of decisions inside one process, and that harness
-is what proves a risky change flipped nothing. State parked in a module global would leak
-between cases there and produce a clean, plausible, wrong replay result with nothing
-reporting it -- a silent failure aimed squarely at the instrument used to detect silent
-failures.
+**An explicit argument, not an ambient singleton.** A module-level instance would leak
+state across ``tools/corpus_build.py``'s in-process replay of many decisions in one
+process -- a real scenario today, not a hypothetical one.
 
 **Facts only.** Nothing here decides anything. The moment a method on this class makes a
 decision, callers start depending on behaviour rather than on data, and which caller
 depends on which behaviour stops being answerable.
 
-**Scope is the hook's own invocation.** ``pyproject.toml`` declares eight console
-scripts; the other seven -- installer, security audit, maintenance, session start, update
-check, permission migration, skill update -- are separate entry points with their own
-lifecycles, and ``hook.py`` imports none of them. An object named for one hook evaluation
-has no meaning inside ``toolguard-install``, so it does not go there.
+**Scope is the hook's own invocation** -- toolguard's other console-script entry points
+have their own lifecycles and do not import this module.
 """
 
 from dataclasses import dataclass, field

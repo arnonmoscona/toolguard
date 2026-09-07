@@ -74,7 +74,7 @@ def _toolguard_layer(
     of ``takeover_mode``/``governed_tools``), matching its real schema: unlike
     ``no_match_fallback`` it has no ``[takeover_mode]`` section or legacy alias.
 
-    ``**top_level_fallback_keys`` covers the TOO-28 ``'*_in_auto_mode'`` keys
+    ``**top_level_fallback_keys`` covers the ``'*_in_auto_mode'`` keys
     (e.g. ``no_match_fallback_in_auto_mode="allow"``), which share that same
     top-level, no-alias shape -- a kwarg per key here rather than a named
     parameter each, since both are the only two callers need today and PLR0913
@@ -954,7 +954,7 @@ class TestLooseUndecidableFallback(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Loose-*-fallback-in-auto-mode (TOO-28)
+# Loose-*-fallback-in-auto-mode
 # ---------------------------------------------------------------------------
 
 

@@ -130,13 +130,23 @@ entry over letting it silently go stale.
   bypassing its native prompts -- a different layer, can be combined but solves a different
   problem. See
   [auto-mode.md#how-this-differs-from-takeover-mode](auto-mode.md#how-this-differs-from-takeover-mode).
-- **Q: Can I run Claude Code in an auto-accept/bypass-permissions mode safely with
-  toolguard?**
-  A: Yes, toolguard's hook still enforces underneath -- but read the honest tradeoff on
-  `no_match_fallback_in_auto_mode = "allow_with_warning"` first, it's a narrow recommendation
-  for this case only (the setting resolves in place of `no_match_fallback` only while
-  `permission_mode` is auto, so it never loosens an interactive session). See
-  [auto-mode.md](auto-mode.md).
+- **Q: Can I run Claude Code in an unattended mode (`acceptEdits`, `bypassPermissions`,
+  `auto`, `dontAsk`) safely with toolguard?**
+  A: Yes, toolguard's hook still enforces underneath regardless of mode -- but
+  `no_match_fallback_in_auto_mode = "allow_with_warning"` only helps under `permission_mode
+  == "auto"` specifically; it never fires for `acceptEdits`/`bypassPermissions`/`dontAsk`, so
+  those need the BASE `no_match_fallback`/`undecidable_fallback` settings configured
+  directly instead, governing toolguard's own decision exactly as in an interactive session.
+  A toolguard `ask` stops the call in every one of these modes -- measured, not inferred
+  (Claude Code 2.1.260, 2026-09-07; see
+  [`test/manual/ask_binding_probe.sh`](../test/manual/README.md)). See
+  [auto-mode.md](auto-mode.md), whose opening section covers the distinction first.
+- **Q: Does toolguard replace Claude Code's own auto-mode classifier, or work alongside it?**
+  A: Alongside. toolguard decides by exact pattern match, the classifier by semantic
+  judgement -- complementary halves with inverted strengths, not two implementations of the
+  same control. Read this before configuring any `_in_auto_mode` setting or
+  `auto_mode_behavior`. See
+  [auto-mode.md#division-of-labour-toolguard-vs-auto-mode-guidance](auto-mode.md#division-of-labour-toolguard-vs-auto-mode-guidance).
 - **Q: How does `no_match_fallback_in_auto_mode`/`undecidable_fallback_in_auto_mode` differ
   from the base `no_match_fallback`/`undecidable_fallback` settings?**
   A: Same value vocabulary and resolution, but each `'*_in_auto_mode'` key applies only when
@@ -260,10 +270,12 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Sources](architecture-as-built.md#sources)
 
 **`docs/auto-mode.md`**
+- [Division of labour: toolguard vs. auto-mode guidance](auto-mode.md#division-of-labour-toolguard-vs-auto-mode-guidance)
 - [The honest tradeoff](auto-mode.md#the-honest-tradeoff)
 - [Why `no_match_fallback = "ask"` (the normal default) doesn't work here](auto-mode.md#why-no_match_fallback--ask-the-normal-default-doesnt-work-here)
 - [The recommended configuration for this specific case](auto-mode.md#the-recommended-configuration-for-this-specific-case)
 - [Recommended checklist before you turn this on](auto-mode.md#recommended-checklist-before-you-turn-this-on)
+- [The auto-mode trace log](auto-mode.md#the-auto-mode-trace-log)
 - [How this differs from Takeover Mode](auto-mode.md#how-this-differs-from-takeover-mode)
 
 **`docs/config-sync.md`**

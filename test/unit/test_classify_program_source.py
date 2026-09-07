@@ -2,7 +2,7 @@
 
 ``classify_program_source`` (in :mod:`toolguard.parser.command_extractor`)
 answers a binary visibility question for a leaf command: is its executable
-material a file, or not (TOO-28 spec 4.3). It is the classifier a rule's
+material a file, or not. It is the classifier a rule's
 ``program_source`` guard consumes; :mod:`test_rule_entry` and
 :mod:`test_permission_resolution` cover the guard itself.
 """

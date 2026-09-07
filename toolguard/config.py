@@ -130,9 +130,9 @@ class _FallbackSetting:
     One 'fallback'-shaped ``toolguard_hook`` setting's declared facts.
 
     The single registry both :meth:`Configuration.unrecognized_fallback_settings` and
-    the TOO-19 parse-failure-floor invariant test
-    (``test.unit.test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting``,
-    spec section 8) read, so a setting missing from here is invisible to both rather than
+    the parse-failure-floor invariant test
+    (``test.unit.test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting``)
+    read, so a setting missing from here is invisible to both rather than
     only to whichever site a human remembered to update.
 
     Built after :class:`Configuration` (see the bottom of that class' section of this
@@ -1412,7 +1412,7 @@ class Configuration:
 
     def resolved_no_match_fallback_in_auto_mode(self) -> str:
         """
-        Resolve the effective ``no_match_fallback_in_auto_mode`` (TOO-28) -- the
+        Resolve the effective ``no_match_fallback_in_auto_mode`` -- the
         no-match handoff to trust when Claude Code's own ``permission_mode`` is
         ``'auto'``, a declaration of how much to trust the auto-mode classifier for a
         command toolguard read but had no rule for.
@@ -1435,7 +1435,7 @@ class Configuration:
 
     def resolved_undecidable_fallback_in_auto_mode(self) -> str:
         """
-        Resolve the effective ``undecidable_fallback_in_auto_mode`` (TOO-28) -- the
+        Resolve the effective ``undecidable_fallback_in_auto_mode`` -- the
         undecidable-command handoff to trust when Claude Code's own ``permission_mode``
         is ``'auto'``, a declaration of how much to trust the auto-mode classifier for a
         command toolguard could not read at all.
@@ -1462,14 +1462,13 @@ class Configuration:
         """
         Find every layer that sets a ``*_fallback`` key to an unusable value.
 
-        Iterates :data:`_FALLBACK_SETTINGS` -- the single declared registry of every
-        fallback-shaped setting, also read by the TOO-19 parse-failure-floor invariant
-        test (spec section 8), so a setting missing from the registry is invisible to
-        both rather than only to one of them.
+        Iterates :data:`_FALLBACK_SETTINGS` -- see :class:`_FallbackSetting`'s own
+        docstring for why it is the single registry both this method and the
+        parse-failure-floor invariant test consult.
 
         :meth:`resolved_no_match_fallback` and :meth:`resolved_undecidable_fallback` fall
         back to ``'ask'`` when the configured value is not recognized; their
-        ``'*_in_auto_mode'`` counterparts (TOO-28) instead defer to the resolved base
+        ``'*_in_auto_mode'`` counterparts instead defer to the resolved base
         setting (:attr:`_FallbackSetting.defers_to`), since they have no fixed default of
         their own. Both are the safe direction and neither is changed here. Without this
         diagnostic that failure is silent: ``no_match_fallback = "allow_with_no_warning"``

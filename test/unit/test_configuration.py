@@ -2168,7 +2168,7 @@ class TestResolvedUndecidableFallback(unittest.TestCase):
 class TestResolvedFallbacksInAutoMode(unittest.TestCase):
     """
     Configuration.resolved_no_match_fallback_in_auto_mode() /
-    resolved_undecidable_fallback_in_auto_mode() (TOO-28): same value vocabulary as
+    resolved_undecidable_fallback_in_auto_mode(): same value vocabulary as
     the base settings, but unset (or unrecognized) defers to the resolved BASE
     setting rather than to a fixed literal.
     """
@@ -2313,7 +2313,7 @@ class TestResolvedFallbacksInAutoMode(unittest.TestCase):
 
 class TestUnrecognizedFallbackSettingsAutoMode(unittest.TestCase):
     """
-    Configuration.unrecognized_fallback_settings() (extended for TOO-28): the
+    Configuration.unrecognized_fallback_settings(): the
     '*_in_auto_mode' keys are diagnosed the same way as the base keys, but the
     reported fallback names the resolved BASE setting instead of a fixed 'ask'.
     """

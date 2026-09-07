@@ -257,11 +257,18 @@ command-parsing layer.
 declaring a `[hard_deny]`, that hard deny is not enforced while the file is broken -- the
 command it was blocking resolves to ASK instead of DENY.
 
-> **It does not become a silent allow, including in [auto-mode](auto-mode.md).** An ASK
-> returned by toolguard's `PreToolUse` hook is a real permission request, and Claude Code's
-> unattended modes do not bypass it -- the command still stops and waits. So a `[hard_deny]`
-> lost to a TOML syntax error degrades from "blocked outright" to "blocked pending an answer",
-> not to "allowed". What you lose is the DENY; what you keep is the stop.
+> **It does not become a silent allow, in any permission mode -- measured, not inferred.** An
+> ASK returned by toolguard's `PreToolUse` hook is a real permission request, and Claude
+> Code's unattended modes do not bypass it. So a `[hard_deny]` lost to a TOML syntax error
+> degrades from "blocked outright" to "blocked pending an answer", not to "allowed". What you
+> lose is the DENY; what you keep is the stop.
+>
+> Verified against Claude Code 2.1.260 on 2026-09-07 by driving a real session in each mode:
+> a rule resolving to ASK stopped the command under `default`, `acceptEdits`, `dontAsk` and
+> `bypassPermissions` alike, with a control confirming the same command ran under
+> `bypassPermissions` when the rule allowed it. `dontAsk` denies outright rather than waiting
+> -- also fail-closed, just not a "stop and wait". Re-run it after a Claude Code upgrade:
+> [`test/manual/ask_binding_probe.sh`](../test/manual/README.md).
 >
 > In an unattended run that means the session **stalls** on the first affected command rather
 > than proceeding without the rule -- the same dead end

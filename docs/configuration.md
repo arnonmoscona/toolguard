@@ -605,6 +605,12 @@ inline code and heredoc payloads (`python -c ...`, `<<EOF ... EOF`), process sub
 two situations toolguard has no rule to evaluate against the command's actual contents, so it
 names a **floor level** instead of a normal decision.
 
+**The foreign-inline-code floor recognizes a fixed, non-exhaustive list of interpreters** --
+`python`, `node`, `ruby`, `perl`, `php`, `Rscript`, `awk`, and a few shells. An interpreter
+outside that list (`lua`, `deno`, `bun`, `julia`, and others) is not classified as undecidable
+at all; it resolves through the ordinary `no_match_fallback` path like ordinary unmatched
+commands, not through this floor. Do not read this setting as covering every interpreter.
+
 Set it as a **top-level** key in `toolguard_hook.toml`:
 
 ```toml
@@ -666,7 +672,7 @@ is planned; this is a brand-new setting with no prior spelling to preserve. Appl
 
 `no_match_fallback_in_auto_mode` and `undecidable_fallback_in_auto_mode` let you resolve `no_match_fallback`/`undecidable_fallback` differently when Claude Code's own `permission_mode` is its **auto** mode -- the one where Claude Code stops asking for permission on its own (see [Auto-mode with toolguard](auto-mode.md) for the operational picture; this section is the reference for the two settings themselves).
 
-**These are handoff points, not "auto-mode variants" of the base settings.** Each one is a declaration of how much you trust Claude Code's own auto-mode classifier for one specific class of case toolguard would otherwise ask about -- an unmatched-but-readable command, or one toolguard could not safely read at all. Setting one does not make toolguard "smarter" about auto mode; it names a point where you have decided the other half of the division of labour (see [How this differs from Takeover Mode](auto-mode.md#how-this-differs-from-takeover-mode)) should take over instead.
+**These are handoff points, not "auto-mode variants" of the base settings.** Each one is a declaration of how much you trust Claude Code's own auto-mode classifier for one specific class of case toolguard would otherwise ask about -- an unmatched-but-readable command, or one toolguard could not safely read at all. Setting one does not make toolguard "smarter" about auto mode; it names a point where you have decided the other half of the division of labour (see [Division of labour: toolguard vs. auto-mode guidance](auto-mode.md#division-of-labour-toolguard-vs-auto-mode-guidance)) should take over instead.
 
 **They are two independent settings, deliberately not one flag.** You may reasonably trust the classifier with a command toolguard read and simply had no rule for, while still refusing to hand it something toolguard could not read at all -- a single combined flag would force the same answer to both questions.
 
