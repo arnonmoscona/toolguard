@@ -152,8 +152,10 @@ Prefix handling is per-group in Claude Code, and toolguard follows it (checked a
 
 | | leading assignment (`FOO=bar cmd`) | wrappers (`timeout 30 cmd`) |
 |---|---|---|
-| `allow`, and `[hard_deny]`'s allow carve-out | matched past **only** for known-safe variables | matched past |
+| `allow`, and `[hard_deny]`'s allow carve-out | matched past **only** for names listed in [`assignments_looked_past_when_granting`](configuration.md#assignments-looked-past-when-granting), which **defaults to empty** | matched past |
 | `ask`, `deny`, `[hard_deny]`'s deny | matched past for **any** variable | matched past |
+
+Full detail, including how this compares with Claude Code's own policy, is in [Permission Patterns: leading environment assignments](permission-patterns.md#leading-environment-assignments) -- that is where the engine-wide behaviour is documented, and this table is only the part that bears on `auto_mode_behavior`.
 
 **The asymmetry is deliberate, not an oversight.** An allow rule should not match past `LD_PRELOAD=evil.so npm test`, because the assignment changes what actually runs and the visible command is no longer the whole story. A deny or ask rule matches past any assignment for the mirror-image reason: there you want to catch the command however it is dressed.
 
@@ -161,7 +163,11 @@ Prefix handling is per-group in Claude Code, and toolguard follows it (checked a
 
 **Nothing here fails open**, which is why this is a note rather than a warning. The groups that do *not* match past an arbitrary assignment are exactly the permission-**granting** ones, so a missed match withholds permission rather than conceding it. What you get instead is a rule that quietly stops covering what you expected: the command falls through to the fallback, and appears in the [auto-mode trace](#the-auto-mode-trace-log) under `fallback_cause: "no_match"` -- which reads as *"write a rule for this"* when the rule already exists.
 
-**If a rule must cover a command with a leading assignment in both modes, write it as a regex.** A `[regex]` pattern is matched against the raw command text with no prefix handling at all, so it behaves identically whatever group the rule is matched under:
+**If a rule must cover a command with a leading assignment in both modes, there are two answers, and the first is usually right.**
+
+**Name the variable.** Adding it to [`assignments_looked_past_when_granting`](configuration.md#assignments-looked-past-when-granting) makes the allow group match past it too, so both groups agree and the rule covers the same commands in either mode. This is the fix whenever the prefix is a variable you can name -- `TG_INTENT`, `PYTHONPATH`, whatever your workflow puts there. It is a deliberate widening of what allow rules accept, which is why the list starts empty.
+
+**Or write the rule as a regex**, when the prefix varies or you want it stated in the rule itself. A `[regex]` pattern is matched against the raw command text with no prefix handling at all, so it behaves identically whatever group the rule is matched under:
 
 ```toml
 [permissions]
@@ -174,7 +180,7 @@ ask = [
 ]
 ```
 
-Writing the prefix into the pattern makes it explicit, which is the trade: you give up native's built-in judgement about which prefixes are safe, and take responsibility for it yourself. Prefer the native form unless a real command is falling through.
+Writing the prefix into the pattern makes it explicit, which is the trade: the rule now says which prefixes it accepts, and nothing else reviews that judgement. Prefer the native form unless a real command is falling through.
 
 ## The auto-mode trace log
 
