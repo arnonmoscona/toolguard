@@ -141,6 +141,14 @@ entry over letting it silently go stale.
   (Claude Code 2.1.260, 2026-09-07; see
   [`test/manual/ask_binding_probe.sh`](../test/manual/README.md)). See
   [auto-mode.md](auto-mode.md), whose opening section covers the distinction first.
+- **Q: My rule with `auto_mode_behavior` matches interactively but not under auto mode. Why?**
+  A: Almost certainly a leading environment assignment (`PYTHONPATH=. cmd`, `TG_INTENT=1 cmd`).
+  Prefix handling is per-group: `allow` matches past only known-safe variables, while
+  `ask`/`deny` match past any. A rule migrating to a different effective group therefore
+  covers a slightly different set of commands. Nothing fails open -- the non-matching groups
+  are the permission-granting ones. Use a `[regex]` pattern if a rule must cover the same
+  commands in both modes. See
+  [auto-mode.md#auto_mode_behavior-and-command-prefixes](auto-mode.md#auto_mode_behavior-and-command-prefixes).
 - **Q: Does toolguard replace Claude Code's own auto-mode classifier, or work alongside it?**
   A: Alongside. toolguard decides by exact pattern match, the classifier by semantic
   judgement -- complementary halves with inverted strengths, not two implementations of the
@@ -275,6 +283,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Why `no_match_fallback = "ask"` (the normal default) doesn't work here](auto-mode.md#why-no_match_fallback--ask-the-normal-default-doesnt-work-here)
 - [The recommended configuration for this specific case](auto-mode.md#the-recommended-configuration-for-this-specific-case)
 - [Recommended checklist before you turn this on](auto-mode.md#recommended-checklist-before-you-turn-this-on)
+- [`auto_mode_behavior` and command prefixes](auto-mode.md#auto_mode_behavior-and-command-prefixes)
 - [The auto-mode trace log](auto-mode.md#the-auto-mode-trace-log)
 - [How this differs from Takeover Mode](auto-mode.md#how-this-differs-from-takeover-mode)
 

@@ -101,9 +101,11 @@ enumerated in your rules, which most real setups have not.
 no_match_fallback_in_auto_mode = "allow_with_warning"
 ```
 
-This lets anything unmatched proceed (so the session does not stall) **only while `permission_mode` is auto**, and logs every one of those decisions to `logs/toolguard-YYYY-MM-DD.md` with a warning marker -- giving you a full, reviewable trail of everything that ran *without* an explicit rule behind it. Your explicit `allow`/`deny` rules and your `hard_deny` floor are still fully enforced; only the *unmatched* case, and only under auto mode, is loosened.
+This lets anything unmatched proceed (so the session does not stall) **only while `permission_mode` is auto**, and logs every one of those decisions to `logs/toolguard-YYYY-MM-DD.md` -- each carrying the command and `[fallback allow -- no rule matched]`, so you have a full, reviewable trail of everything that ran *without* an explicit rule behind it. Under auto mode every one of them is also appended to the [auto-mode trace](#the-auto-mode-trace-log) as a second, machine-readable record. Your explicit `allow`/`deny` rules and your `hard_deny` floor are still fully enforced; only the *unmatched* case, and only under auto mode, is loosened.
 
-**Do not substitute `no_match_fallback_in_auto_mode = "allow"` (or its `allow_with_no_warnings` alias) here.** Those values exist for a genuinely different situation -- see [Configuration: No-match fallback](configuration.md#no-match-fallback) -- and produce NO log entry for the unmatched case at all. This whole recommendation's safety story is "everything unmatched is logged so you can review it later"; `allow` quietly deletes that review trail while looking like a simpler version of the same setting. Use `allow_with_warning`.
+**`allow` (and its `allow_with_no_warnings` alias) is a defensible choice here, and the difference is smaller than it looks.** Measured 2026-09-07 against toolguard 0.7.0, driving the same unmatched command under auto mode with each value: the daily log entries are **identical** -- same `EXECUTED` status, same command, same `[fallback allow -- no rule matched]` -- and both write the auto-mode trace. **The review trail is the same either way.** What `allow_with_warning` adds is a warning on **stderr**, in the session, not a mark in the log.
+
+So choose on whether anyone will see that warning. In a session a human is watching -- auto mode with someone at the keyboard -- it is a useful nudge to go write a rule, which is why it suits a **user-level** default that every project inherits. In a genuinely unattended run it is noise nobody reads. Neither value costs you the record.
 
 **Older configs that instead loosen the base `no_match_fallback`/`[takeover_mode]` form directly still work** -- nothing here deprecates that -- but they loosen it for every `permission_mode`, not only the unattended one, which is a wider blast radius than this page has ever actually needed. Prefer the `_in_auto_mode` setting for new configurations.
 
@@ -117,7 +119,7 @@ still hold) -- but it is not a substitute for a well-built rule set. Anything th
 through to the fallback executes *silently*, and you only find out by reading the logs
 afterward. This is a **detective control for the unmatched case, not a preventive one.**
 
-**`no_match_fallback_in_auto_mode` is not the only fallback that can hang an unattended run.** `undecidable_fallback_in_auto_mode` -- the same handoff point for commands toolguard cannot safely parse at all (foreign inline code, heredocs, process substitution), rather than commands that simply match no rule -- has the exact same dead-end problem in auto-mode if left unset (it then defers to `undecidable_fallback`, which defaults to `ask`). Loosening `no_match_fallback_in_auto_mode` alone does not touch it. `toolguard-audit` raises a HIGH finding (`loose-undecidable-fallback-in-auto-mode`) if you loosen it to `allow_with_warning`, which is a signal to weigh the same tradeoff deliberately rather than by default. See [Configuration: Fallback settings in auto mode](configuration.md#fallback-settings-in-auto-mode) and [Security: Loosening the undecidable fallback](security.md#loosening-the-undecidable-fallback).
+**`no_match_fallback_in_auto_mode` is not the only fallback that can hang an unattended run.** `undecidable_fallback_in_auto_mode` -- the same handoff point for commands toolguard cannot safely parse at all (foreign inline code, heredocs, process substitution), rather than commands that simply match no rule -- has the exact same dead-end problem in auto-mode if left unset (it then defers to `undecidable_fallback`, which defaults to `ask`). Loosening `no_match_fallback_in_auto_mode` alone does not touch it. `toolguard-audit` raises a HIGH finding (`loose-undecidable-fallback-in-auto-mode`) whenever the auto-mode value is looser than the base one, whichever loose value you choose, which is a signal to weigh the same tradeoff deliberately rather than by default. Its no-match counterpart (`loose-no-match-fallback-in-auto-mode`) fires on the same condition at LOW. See [Configuration: Fallback settings in auto mode](configuration.md#fallback-settings-in-auto-mode) and [Security: Loosening the undecidable fallback](security.md#loosening-the-undecidable-fallback).
 
 ## Recommended checklist before you turn this on
 
@@ -141,6 +143,38 @@ afterward. This is a **detective control for the unmatched case, not a preventiv
    Code is prompting natively again.)
 
 Toolguard's logs also record Claude Code's own `permission_mode` for every decision. As of the `_in_auto_mode` settings above, this is no longer purely diagnostic: when one of them is configured and the recorded mode is auto, it is also what decided the two fallback cases those settings cover. It remains diagnostic-only for everything else the log records, and you can audit exactly which mode a given command ran under after the fact.
+
+## `auto_mode_behavior` and command prefixes
+
+A rule carrying [`auto_mode_behavior`](configuration.md#per-rule-auto-mode-behavior) is matched under its **effective** group when `permission_mode` is auto -- that is the point of the key, and it is what makes an `ask` rule declaring `allow` compete with an allow's precedence rather than an ask's. One consequence is easy to miss: **the group also decides how command prefixes are handled, so a migrated rule can cover a slightly different set of commands in each mode.**
+
+Prefix handling is per-group in Claude Code, and toolguard follows it (checked against [the permissions docs](https://code.claude.com/docs/en/permissions), 2026-09-08):
+
+| | leading assignment (`FOO=bar cmd`) | wrappers (`timeout 30 cmd`) |
+|---|---|---|
+| `allow`, and `[hard_deny]`'s allow carve-out | matched past **only** for known-safe variables | matched past |
+| `ask`, `deny`, `[hard_deny]`'s deny | matched past for **any** variable | matched past |
+
+**The asymmetry is deliberate, not an oversight.** An allow rule should not match past `LD_PRELOAD=evil.so npm test`, because the assignment changes what actually runs and the visible command is no longer the whole story. A deny or ask rule matches past any assignment for the mirror-image reason: there you want to catch the command however it is dressed.
+
+**Which migrations to watch: those with `allow` on exactly one side.** `ask -> allow`, `deny -> allow`, `allow -> ask` and `allow -> deny` all cross the line in the table above, so a command with a leading assignment can match in one mode and not the other. `ask -> deny` and `deny -> ask` are unaffected -- both groups treat prefixes identically.
+
+**Nothing here fails open**, which is why this is a note rather than a warning. The groups that do *not* match past an arbitrary assignment are exactly the permission-**granting** ones, so a missed match withholds permission rather than conceding it. What you get instead is a rule that quietly stops covering what you expected: the command falls through to the fallback, and appears in the [auto-mode trace](#the-auto-mode-trace-log) under `fallback_cause: "no_match"` -- which reads as *"write a rule for this"* when the rule already exists.
+
+**If a rule must cover a command with a leading assignment in both modes, write it as a regex.** A `[regex]` pattern is matched against the raw command text with no prefix handling at all, so it behaves identically whatever group the rule is matched under:
+
+```toml
+[permissions]
+ask = [
+    # native pattern: does not cover `PYTHONPATH=. uv run python x.py` under auto
+    { match = "Bash(uv run python:*)", auto_mode_behavior = "allow" },
+
+    # regex: covers it in both modes, because you decide what the prefix may be
+    { match = "Bash([regex]^(?:[A-Za-z_][A-Za-z0-9_]*=\\S* )*uv run python\\b)", auto_mode_behavior = "allow" },
+]
+```
+
+Writing the prefix into the pattern makes it explicit, which is the trade: you give up native's built-in judgement about which prefixes are safe, and take responsibility for it yourself. Prefer the native form unless a real command is falling through.
 
 ## The auto-mode trace log
 
