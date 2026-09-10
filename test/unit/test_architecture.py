@@ -18,7 +18,11 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from toolguard import config, config_types, issues, rule_entry
+import toolguard
+from toolguard.configuration import config
+from toolguard.foundation import issues
+from toolguard.decision_model import vocabulary as config_types
+from toolguard.decision_model import rule_entry
 
 # Repo-root ``tools/`` (dev-only, NOT ``toolguard/tools/``) is importable when the
 # suite runs with ``-t .``; mirror that so this file also runs standalone.
@@ -26,97 +30,130 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import architecture_fitness as af
 
-TOOLGUARD_ROOT = Path(config.__file__).parent
+# Derived from the package, not from a module inside it: since TOO-78 the
+# modules sit in layer subpackages, so a module's parent is no longer the root.
+TOOLGUARD_ROOT = Path(toolguard.__file__).parent
 PYSCN_TOML = TOOLGUARD_ROOT.parent / ".pyscn.toml"
 
 #: Allowed toolguard-internal imports per governed module, lowest layer first.
 #: Each set is EXACT: an unused declared edge fails just as an undeclared import
 #: does, so the map cannot be loosened without also changing the code.
 LAYERS = (
-    ("toolguard.issues", frozenset()),
-    ("toolguard.ambient", frozenset()),
-    ("toolguard.claude_code_contract", frozenset()),
-    ("toolguard.path_utils", frozenset({"toolguard.ambient"})),
-    ("toolguard.normalization", frozenset({"toolguard.ambient"})),
-    ("toolguard.toml_scan", frozenset()),
-    ("toolguard.file_lock", frozenset()),
+    ("toolguard.foundation.issues", frozenset()),
+    ("toolguard.foundation.ambient", frozenset()),
+    ("toolguard.integration.claude_code_contract", frozenset()),
+    ("toolguard.foundation.path_utils", frozenset({"toolguard.foundation.ambient"})),
+    ("toolguard.foundation.normalization", frozenset({"toolguard.foundation.ambient"})),
+    ("toolguard.foundation.toml_scan", frozenset()),
+    ("toolguard.foundation.file_lock", frozenset()),
     # The empty set is the point -- invocation carries facts and imports nothing,
     # which is what keeps it usable from every layer above without creating an
     # edge. In particular it must never import config: config and resolve
     # deliberately have no edge between them, and this must not become the first one.
-    ("toolguard.invocation", frozenset()),
-    ("toolguard.tool_spec", frozenset({"toolguard.claude_code_contract"})),
-    ("toolguard.patterns", frozenset({"toolguard.normalization"})),
+    ("toolguard.foundation.invocation", frozenset()),
     (
-        "toolguard.constants",
-        frozenset({"toolguard.claude_code_contract", "toolguard.tool_spec"}),
-    ),
-    ("toolguard._git", frozenset({"toolguard.constants"})),
-    (
-        "toolguard.install_provenance",
-        frozenset({"toolguard._git", "toolguard.ambient", "toolguard.constants"}),
+        "toolguard.foundation.tool_spec",
+        frozenset({"toolguard.integration.claude_code_contract"}),
     ),
     (
-        "toolguard.install_update",
-        frozenset({"toolguard._git", "toolguard.ambient", "toolguard.constants"}),
-    ),
-    ("toolguard.config_write_guard", frozenset()),
-    (
-        "toolguard.rule_entry",
-        frozenset({"toolguard.issues", "toolguard.constants"}),
+        "toolguard.foundation.patterns",
+        frozenset({"toolguard.foundation.normalization"}),
     ),
     (
-        "toolguard.rule_sort",
-        frozenset({"toolguard.rule_entry", "toolguard.toml_scan"}),
-    ),
-    ("toolguard.config_types", frozenset({"toolguard.rule_entry"})),
-    (
-        "toolguard.permissions",
+        "toolguard.foundation.constants",
         frozenset(
             {
-                "toolguard.config_types",
-                "toolguard.constants",
-                "toolguard.normalization",
-                "toolguard.patterns",
+                "toolguard.integration.claude_code_contract",
+                "toolguard.foundation.tool_spec",
+            }
+        ),
+    ),
+    ("toolguard.install._git", frozenset({"toolguard.foundation.constants"})),
+    (
+        "toolguard.install.install_provenance",
+        frozenset(
+            {
+                "toolguard.install._git",
+                "toolguard.foundation.ambient",
+                "toolguard.foundation.constants",
             }
         ),
     ),
     (
-        "toolguard.file_matching",
+        "toolguard.install.install_update",
         frozenset(
             {
-                "toolguard.config_types",
-                "toolguard.constants",
-                "toolguard.normalization",
-                "toolguard.patterns",
-                "toolguard.permissions",
+                "toolguard.install._git",
+                "toolguard.foundation.ambient",
+                "toolguard.foundation.constants",
+            }
+        ),
+    ),
+    ("toolguard.configuration.config_write_guard", frozenset()),
+    (
+        "toolguard.decision_model.rule_entry",
+        frozenset({"toolguard.foundation.issues", "toolguard.foundation.constants"}),
+    ),
+    (
+        "toolguard.configuration.rule_sort",
+        frozenset(
+            {"toolguard.decision_model.rule_entry", "toolguard.foundation.toml_scan"}
+        ),
+    ),
+    (
+        "toolguard.decision_model.vocabulary",
+        frozenset({"toolguard.decision_model.rule_entry"}),
+    ),
+    (
+        "toolguard.engine.permissions",
+        frozenset(
+            {
+                "toolguard.decision_model.vocabulary",
+                "toolguard.foundation.constants",
+                "toolguard.foundation.normalization",
+                "toolguard.foundation.patterns",
             }
         ),
     ),
     (
-        "toolguard.permission_resolution",
+        "toolguard.engine.file_matching",
         frozenset(
             {
-                "toolguard.config_types",
-                "toolguard.constants",
-                "toolguard.permissions",
-                "toolguard.file_matching",
+                "toolguard.decision_model.vocabulary",
+                "toolguard.foundation.constants",
+                "toolguard.foundation.normalization",
+                "toolguard.foundation.patterns",
+                "toolguard.engine.permissions",
+            }
+        ),
+    ),
+    (
+        "toolguard.engine.permission_resolution",
+        frozenset(
+            {
+                "toolguard.decision_model.vocabulary",
+                "toolguard.foundation.constants",
+                "toolguard.engine.permissions",
+                "toolguard.engine.file_matching",
             }
         ),
     ),
 )
 
-#: Types that live in ``config_types`` and are re-exported by ``config``.
-RE_EXPORTED_TYPES = (
-    "Provenance",
-    "ConfigLayer",
-    "ToolPatternLayer",
-    "TakeoverEnabledConflict",
-    "TakeoverConfig",
-    "ConflictOverride",
-    "RuntimeVerdict",
-    "UnrecognizedFallbackSetting",
-)
+#: Types ``config`` re-exports, mapped to the module that DEFINES each.
+#: Two modules since TOO-78 split them: the decision vocabulary moved down to
+#: ``decision_model`` so engine/parser could share it without depending on
+#: ``configuration``, while the four configuration-structure types stayed.
+RE_EXPORTED_TYPES = {
+    "Provenance": "toolguard.decision_model.vocabulary",
+    "ToolPatternLayer": "toolguard.decision_model.vocabulary",
+    "ConflictOverride": "toolguard.decision_model.vocabulary",
+    "RuntimeVerdict": "toolguard.decision_model.vocabulary",
+    "ConfigLayer": "toolguard.configuration.config_types",
+    "TakeoverEnabledConflict": "toolguard.configuration.config_types",
+    "TakeoverConfig": "toolguard.configuration.config_types",
+    "UnrecognizedFallbackSetting": "toolguard.configuration.config_types",
+}
 
 #: Modules whose presence proves a source walk actually reached the package.
 WALK_ANCHORS = frozenset({"config.py", "hook.py", "permissions.py", "issues.py"})
@@ -126,11 +163,11 @@ WALK_ANCHORS = frozenset({"config.py", "hook.py", "permissions.py", "issues.py"}
 #: walked nothing and its clean verdict is vacuous. The subpackage entry is the only
 #: one that fails a walk which never descends past the package root.
 AMBIENT_ANCHORS = (
-    ("ambient", af.AMBIENT_RULE_OS_IMPORT, "os"),
-    ("file_lock", af.AMBIENT_RULE_OS_IMPORT, "os"),
-    ("ambient", af.AMBIENT_RULE_PATH_MEMBER, "cwd"),
-    ("ambient", af.AMBIENT_RULE_PATH_MEMBER, "home"),
-    ("path_utils", af.AMBIENT_RULE_PATH_MEMBER, "expanduser"),
+    ("foundation.ambient", af.AMBIENT_RULE_OS_IMPORT, "os"),
+    ("foundation.file_lock", af.AMBIENT_RULE_OS_IMPORT, "os"),
+    ("foundation.ambient", af.AMBIENT_RULE_PATH_MEMBER, "cwd"),
+    ("foundation.ambient", af.AMBIENT_RULE_PATH_MEMBER, "home"),
+    ("foundation.path_utils", af.AMBIENT_RULE_PATH_MEMBER, "expanduser"),
     ("testing.sandbox", af.AMBIENT_RULE_PATH_MEMBER, "home"),
 )
 
@@ -194,10 +231,21 @@ def _module_imports(path: Path, package: str) -> set:
 
 
 def _internal_imports(path: Path, package: str) -> set:
-    """The toolguard modules *path* imports, excluding submodule-attribute noise."""
+    """
+    The toolguard modules *path* imports, excluding submodule-attribute noise.
+
+    Package names are dropped, not just the root: since TOO-78 put modules in
+    layer subpackages, ``from toolguard.foundation import ambient`` yields the
+    package alongside the module, and only the module is a layering edge.
+    """
     imported = _module_imports(path, package)
-    return {name for name in imported if name.split(".")[0] == "toolguard"} - {
-        "toolguard"
+    return {
+        name
+        for name in imported
+        if name.split(".")[0] == "toolguard"
+        and not TOOLGUARD_ROOT.parent.joinpath(
+            *name.split("."), "__init__.py"
+        ).is_file()
     }
 
 
@@ -250,7 +298,9 @@ def _architecture_config() -> tuple:
 def _config_reexports() -> dict:
     """Names config.py imports at module level from each ``toolguard.*`` module."""
     reexports = {}
-    for node in ast.parse(_module_path("toolguard.config").read_text()).body:
+    for node in ast.parse(
+        _module_path("toolguard.configuration.config").read_text()
+    ).body:
         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
             "toolguard."
         ):
@@ -284,6 +334,9 @@ class TestImportExtraction(unittest.TestCase):
         Given the six syntactic forms of importing toolguard.config
         When each is extracted from a module in the package
         Then all six resolve to the absolute name toolguard.config
+
+        The synthetic package built in setUp is flat on purpose: this tests the
+        extractor's handling of import SYNTAX, not the real tree's layout.
         """
         forms = (
             "import toolguard.config\n",
@@ -402,15 +455,15 @@ class TestModuleLayering(unittest.TestCase):
         """
         Given every module declared in LAYERS
         When their real import statements are parsed from source
-        Then none of them imports toolguard.config
+        Then none of them imports toolguard.configuration.config
         """
         for module_name, _allowed in LAYERS:
             with self.subTest(module=module_name):
                 path = _module_path(module_name)
                 self.assertNotIn(
-                    "toolguard.config",
+                    "toolguard.configuration.config",
                     _module_imports(path, _package_of(path)),
-                    f"{module_name} imports toolguard.config -- circular layering",
+                    f"{module_name} imports toolguard.configuration.config -- circular layering",
                 )
 
     def test_each_governed_module_imports_only_what_it_declares(self):
@@ -508,7 +561,13 @@ class TestLayerMapAgreesWithArchitectureConfig(unittest.TestCase):
         When each is looked up in .pyscn.toml's package map
         Then all of them are mapped, so the two specs cover the same modules
         """
-        unmapped = sorted(name for name in self.governed if name not in self.layer_of)
+        # ``layer_of`` is keyed by first segment, which since TOO-78 is the
+        # layer package rather than the module itself.
+        unmapped = sorted(
+            name
+            for name in self.governed
+            if af.first_segment(name) not in self.layer_of
+        )
         self.assertEqual(
             unmapped,
             [],
@@ -545,7 +604,10 @@ class TestLayerMapAgreesWithArchitectureConfig(unittest.TestCase):
             nothing checked it until two modules had already gone missing from it
         """
         doc = (TOOLGUARD_ROOT.parent / "docs" / "architecture-as-built.md").read_text()
-        rows = re.findall(r"^\| `([a-z]+)` \| (.+) \|$", doc, re.MULTILINE)
+        # ``[a-z_]``, not ``[a-z]``: a layer name may carry an underscore
+        # (``decision_model``), and the narrower pattern silently skipped that
+        # row rather than failing -- which would have let it drift unchecked.
+        rows = re.findall(r"^\| `([a-z_]+)` \| (.+) \|$", doc, re.MULTILINE)
         documented = {
             layer: tuple(re.findall(r"`([a-z_/]+)`", cells)) for layer, cells in rows
         }
@@ -574,14 +636,52 @@ class TestLayerMapAgreesWithArchitectureConfig(unittest.TestCase):
         for module_name, allowed in LAYERS:
             for edge in sorted(allowed):
                 with self.subTest(edge=(module_name, edge)):
-                    source_layer = self.layer_of[module_name.split(".", 1)[1]]
-                    target_layer = self.layer_of[edge.split(".", 1)[1]]
+                    # ``layer_of`` is keyed by first segment, which since TOO-78
+                    # is the layer package rather than the module itself.
+                    source_layer = self.layer_of[
+                        af.first_segment(module_name.split(".", 1)[1])
+                    ]
+                    target_layer = self.layer_of[
+                        af.first_segment(edge.split(".", 1)[1])
+                    ]
                     self.assertIn(
                         target_layer,
                         self.allow[source_layer],
                         f"{module_name} -> {edge} is permitted here but denied by "
                         f".pyscn.toml ({source_layer} -> {target_layer})",
                     )
+
+
+class TestEngineIsSealedOffFromConfiguration(unittest.TestCase):
+    """
+    The decision machinery must not be able to reach configuration (TOO-78).
+
+    ``engine`` and ``parser`` decide; they do not load, discover or validate
+    configuration. Before the ``model`` package existed their only edge into
+    ``configuration`` was the shared type vocabulary, which made a later
+    ``from toolguard.configuration.config import load_configuration`` a legal
+    import nobody would notice. Moving the vocabulary down turns that into a
+    hard failure, and this test is what says so in one place.
+    """
+
+    def test_engine_and_parser_import_nothing_from_configuration(self):
+        """
+        Given every module under engine/ and parser/
+        When their module-level imports are read
+        Then none names toolguard.configuration
+        """
+        offenders = []
+        for package in ("engine", "parser"):
+            for path in sorted((TOOLGUARD_ROOT / package).rglob("*.py")):
+                for node in ast.parse(path.read_text()).body:
+                    if isinstance(node, ast.ImportFrom) and (
+                        node.module or ""
+                    ).startswith("toolguard.configuration"):
+                        offenders.append(
+                            f"{path.relative_to(TOOLGUARD_ROOT)}:{node.lineno} "
+                            f"-> {node.module}"
+                        )
+        self.assertEqual(offenders, [], "; ".join(offenders))
 
 
 class TestReExportIdentity(unittest.TestCase):
@@ -615,7 +715,12 @@ class TestReExportIdentity(unittest.TestCase):
         Then the two agree, so no re-exported type escapes the check
         """
         declared = frozenset(RE_EXPORTED_TYPES)
-        actual = frozenset(_config_reexports().get("toolguard.config_types", ()))
+        reexports = _config_reexports()
+        actual = frozenset(
+            name
+            for module in set(RE_EXPORTED_TYPES.values())
+            for name in reexports.get(module, ())
+        )
         self.assertEqual(
             sorted(declared),
             sorted(actual),
@@ -628,12 +733,12 @@ class TestReExportIdentity(unittest.TestCase):
         When each name is looked up on both modules
         Then both resolve to the identical class object
         """
-        self.assertNotEqual(RE_EXPORTED_TYPES, (), "RE_EXPORTED_TYPES is empty")
-        for name in RE_EXPORTED_TYPES:
+        self.assertTrue(RE_EXPORTED_TYPES, "RE_EXPORTED_TYPES is empty")
+        for name, module_name in RE_EXPORTED_TYPES.items():
             with self.subTest(type=name):
                 self.assertIs(
                     getattr(config, name),
-                    getattr(config_types, name),
+                    getattr(importlib.import_module(module_name), name),
                     f"{name} is duplicated in config.py, not re-exported",
                 )
 
@@ -643,13 +748,13 @@ class TestReExportIdentity(unittest.TestCase):
         When each one's __module__ is read from config_types
         Then it names config_types, the module that actually defines them
         """
-        self.assertNotEqual(RE_EXPORTED_TYPES, (), "RE_EXPORTED_TYPES is empty")
-        for name in RE_EXPORTED_TYPES:
+        self.assertTrue(RE_EXPORTED_TYPES, "RE_EXPORTED_TYPES is empty")
+        for name, module_name in RE_EXPORTED_TYPES.items():
             with self.subTest(type=name):
                 self.assertEqual(
-                    getattr(config_types, name).__module__,
-                    "toolguard.config_types",
-                    f"{name} appears to be defined outside config_types",
+                    getattr(importlib.import_module(module_name), name).__module__,
+                    module_name,
+                    f"{name} is not defined where the map says it is",
                 )
 
     def test_leaf_type_reexports_resolve_to_their_leaf_modules(self):
@@ -672,7 +777,9 @@ class TestReExportIdentity(unittest.TestCase):
         When Configuration's defining module is checked
         Then it is still config.py and it is absent from config_types
         """
-        self.assertEqual(config.Configuration.__module__, "toolguard.config")
+        self.assertEqual(
+            config.Configuration.__module__, "toolguard.configuration.config"
+        )
         self.assertFalse(hasattr(config_types, "Configuration"))
 
 
@@ -755,8 +862,8 @@ class TestAmbientRoutesOnTheRealTree(unittest.TestCase):
         self.assertEqual(
             offenders,
             [],
-            f"Read(s) of machine state bypassing toolguard.ambient: {offenders}. "
-            f"Route the module through toolguard.ambient, or -- if it genuinely "
+            f"Read(s) of machine state bypassing toolguard.foundation.ambient: {offenders}. "
+            f"Route the module through toolguard.foundation.ambient, or -- if it genuinely "
             f"owns the fact -- add it to OS_IMPORT_OWNERS / PATH_AMBIENT_OWNERS in "
             f"tools/architecture_fitness.py with the reason.",
         )

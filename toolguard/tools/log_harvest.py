@@ -37,7 +37,7 @@ A section that does not parse -- unreadable heading, no ``Status``, no
 yields the rest of the corpus.  An unrecognised status is not a parse failure:
 ``status`` keeps whatever string the log holds. A section that has a
 ``Status`` field but still can't be turned into an entry is reported via
-:func:`toolguard.error_reporter.report_warning` before being dropped, so the
+:func:`toolguard.observability.error_reporter.report_warning` before being dropped, so the
 loss is never silent; a header-less or ``Status``-less fragment (a Discovery
 section, or a tail left by an embedded ``## `` line splitting a section) is
 not reported, since it never was a lost entry.
@@ -49,9 +49,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator, List, Optional
 
-from toolguard import error_reporter
-from toolguard.constants import FILE_TOOLS
-from toolguard.log_writer import unescape_command_field
+from toolguard.observability import error_reporter
+from toolguard.foundation.constants import FILE_TOOLS
+from toolguard.observability.log_writer import unescape_command_field
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +169,7 @@ def _parse_section(lines: List[str], log_file: Optional[Path]) -> Optional[LogEn
         A :class:`LogEntry`, or ``None`` when the section has no parseable
         header, no ``Status`` field, or no ``Command`` field. A section that
         has a ``Status`` field but still can't yield an entry is reported via
-        :func:`toolguard.error_reporter.report_warning` before returning
+        :func:`toolguard.observability.error_reporter.report_warning` before returning
         ``None`` -- see the module docstring's Robustness section. A section
         with no ``Status`` (e.g. a Discovery section, or a header-less
         fragment produced when an embedded ``## `` line inside a command

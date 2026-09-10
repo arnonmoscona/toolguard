@@ -461,7 +461,7 @@ def find_stale_symbol_references(root: Path) -> list[StaleReference]:
             if not is_role_ref and parts[0] not in _KNOWN_PACKAGE_ROOTS:
                 continue
             # A short-form role like ``:meth:`Configuration.validation_issues``` (no
-            # ``toolguard.config.`` prefix) resolves against Sphinx's current-module context,
+            # ``toolguard.configuration.config.`` prefix) resolves against Sphinx's current-module context,
             # which this resolver does not model -- skip rather than misreport as stale.
             if (
                 is_role_ref
@@ -470,7 +470,7 @@ def find_stale_symbol_references(root: Path) -> list[StaleReference]:
             ):
                 continue
             line = _docstring_line_for_offset(base_lineno, text, match.start())
-            # Try the whole reference as a module path first ("toolguard.resolve"), falling back
+            # Try the whole reference as a module path first ("toolguard.engine.resolve"), falling back
             # to "module + trailing symbol" only when that fails: a submodule is not a symbol
             # defined in its parent's __init__.py, so trying parts[:-1] first misreports it.
             if _module_file_for_dotted(parts) is not None:

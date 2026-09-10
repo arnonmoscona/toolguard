@@ -11,7 +11,7 @@ from types import MappingProxyType
 from typing import List, Optional
 from unittest.mock import MagicMock, patch
 
-from toolguard.config import (
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,

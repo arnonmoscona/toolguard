@@ -9,23 +9,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard import config as config_module
+from toolguard.configuration import config as config_module
 from toolguard.api import decide
-from toolguard.config_validation import (
+from toolguard.configuration.config_validation import (
     KNOWN_SUPPORTED_TOOLS,
     extract_tool_name,
     find_hard_deny_entry_issues,
     find_wrong_shaped_permission_lists,
     validate_permissions,
 )
-from toolguard.error_log import log_warning, log_error
-from toolguard.config import (
+from toolguard.observability.error_log import log_warning, log_error
+from toolguard.configuration.config import (
     _parse_source,
     discover_config_files,
     load_config_file,
     load_configuration,
 )
-from toolguard.issues import Issue
+from toolguard.foundation.issues import Issue
 
 
 class TestTomlConfigLoader(unittest.TestCase):

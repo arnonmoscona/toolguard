@@ -1,15 +1,15 @@
 """
 Sorting of in-memory toolguard rule arrays.
 
-Re-exports :func:`~toolguard.rule_sort.get_tool_priority` and
-:func:`~toolguard.rule_sort.sort_patterns`, which define the canonical order
+Re-exports :func:`~toolguard.configuration.rule_sort.get_tool_priority` and
+:func:`~toolguard.configuration.rule_sort.sort_patterns`, which define the canonical order
 (see that module's docstring), and adds :func:`sort_layer_rules` for sorting a
 layer's allow, deny and ask lists in one call.  Nothing here touches a file.
 """
 
 from typing import List, Optional, Tuple
 
-from toolguard.rule_sort import get_tool_priority, sort_patterns
+from toolguard.configuration.rule_sort import get_tool_priority, sort_patterns
 
 
 __all__ = [

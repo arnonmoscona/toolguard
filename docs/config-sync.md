@@ -105,7 +105,7 @@ Enable automatic migration to keep configurations in sync:
 
 ```toml
 [config_sync]
-# Enable automatic migration on hook startup
+# Enable automatic migration at session start (once per calendar day, per project)
 auto_migrate = false
 
 # Directory for configuration backups

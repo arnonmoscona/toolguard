@@ -24,10 +24,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from toolguard.config import Configuration, Provenance
+from toolguard.configuration.config import Configuration, Provenance
 from toolguard.tools.config_access import per_layer_rules, with_layer_allow_replaced
 from toolguard.tools.log_harvest import LogEntry
-from toolguard.tools.redundancy import _normalised_body
+from toolguard.tools.redundancy import normalised_body
 from toolguard.tools.replay import replay
 
 
@@ -368,16 +368,16 @@ def find_cross_layer_redundancies(
     blocking: Dict[Tuple[str, str], List[int]] = defaultdict(list)
     for position, lr in enumerate(layers):
         for pattern in lr.allow:
-            key = _normalised_body(pattern, fold_case=False)
+            key = normalised_body(pattern, fold_case=False)
             coverage[key].append(((lr.provenance.specificity, position), lr.provenance))
         for pattern in (*lr.deny, *lr.ask):
-            key = _normalised_body(pattern, fold_case=False)
+            key = normalised_body(pattern, fold_case=False)
             blocking[key].append(lr.provenance.specificity)
 
     findings: List[CrossLayerRedundancy] = []
     for position, lr in enumerate(layers):
         for pattern in lr.allow:
-            key = _normalised_body(pattern, fold_case=False)
+            key = normalised_body(pattern, fold_case=False)
             cover = _nearest_broader_cover(
                 coverage, key, (lr.provenance.specificity, position)
             )

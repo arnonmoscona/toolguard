@@ -9,9 +9,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.config import discover_config_files, find_project_root, wrap_tool_pattern
-from toolguard.env_config import find_project_root as env_find_project_root
-from toolguard.patterns import PatternType, match_pattern, parse_pattern
+from toolguard.configuration.config import (
+    discover_config_files,
+    find_project_root,
+    wrap_tool_pattern,
+)
+from toolguard.configuration.env_config import (
+    find_project_root as env_find_project_root,
+)
+from toolguard.foundation.patterns import PatternType, match_pattern, parse_pattern
 
 
 class TestWrapToolPattern(unittest.TestCase):
@@ -284,7 +290,7 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
         (user_claude_dir / "settings.json").write_text("{}")
 
         with patch(
-            "toolguard.config.find_project_root", return_value=home
+            "toolguard.configuration.config.find_project_root", return_value=home
         ) as mock_find_root:
             configs = discover_config_files()
 
@@ -314,7 +320,8 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
         (user_claude_dir / "settings.json").write_text("{}")
 
         with patch(
-            "toolguard.config.find_project_root", side_effect=RuntimeError("No project")
+            "toolguard.configuration.config.find_project_root",
+            side_effect=RuntimeError("No project"),
         ) as mock_find_root:
             configs = discover_config_files()
 
@@ -349,9 +356,9 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
 
 class TestFindProjectRoot(ConfigIsolationMixin, unittest.TestCase):
     """
-    Real (unmocked) tests of toolguard.config.find_project_root's marker walk.
+    Real (unmocked) tests of toolguard.configuration.config.find_project_root's marker walk.
 
-    The mixin patches ``toolguard.config.find_project_root``, but this module
+    The mixin patches ``toolguard.configuration.config.find_project_root``, but this module
     imported it by value, so these tests still call the real function; the mixin
     is used here only for its ``Path.home()`` and environment isolation, which
     the walk's home stop does depend on.

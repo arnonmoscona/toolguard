@@ -44,9 +44,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from toolguard import ambient, env_config, install_provenance
-from toolguard.claude_code_contract import CWD_KEY
-from toolguard.config import Configuration, load_configuration
+from toolguard.configuration import env_config
+from toolguard.configuration.auto_migrate import run_auto_migration_for_config
+from toolguard.foundation import ambient
+from toolguard.install import install_provenance
+from toolguard.integration.claude_code_contract import CWD_KEY
+from toolguard.configuration.config import Configuration, load_configuration
 
 
 def _parse_session_start_input() -> dict:
@@ -82,7 +85,7 @@ def _count_conflict_entries(log_file: Path) -> int:
     """
     Count the conflict entries recorded in a conflict log file.
 
-    Each entry written by :func:`toolguard.error_log.log_conflict` begins with a
+    Each entry written by :func:`toolguard.observability.error_log.log_conflict` begins with a
     Markdown heading of the form ``## YYYY-MM-DD HH:MM:SS - CONFLICT``. An
     unreadable file counts as zero.
     """
@@ -144,7 +147,7 @@ def _format_summary(
             list).
         shadow_status: A :class:`ShadowStatus`, or ``None``.
         unrecognized_fallbacks:
-            :class:`~toolguard.config_types.UnrecognizedFallbackSetting` records.
+            :class:`~toolguard.decision_model.vocabulary.UnrecognizedFallbackSetting` records.
 
     Returns:
         A multi-line string suitable for printing to stdout, or "" when there
@@ -248,7 +251,7 @@ def _detect_broken_config_files(config: Configuration):
     """
     Return every governed config file that is broken -- unparseable, or
     parsed but with a wrong-shaped ``[permissions]``/``[hard_deny]`` list
-    (see :attr:`~toolguard.config.Configuration.parse_failures`).
+    (see :attr:`~toolguard.configuration.config.Configuration.parse_failures`).
 
     A non-empty result means toolguard is clamping every decision to ``'ask'``
     -- except one already resolved to ``'deny'``, which is never weakened --
@@ -271,7 +274,7 @@ def _detect_unrecognized_fallbacks(config: Configuration):
 
     Returns:
         A tuple of
-        :class:`~toolguard.config_types.UnrecognizedFallbackSetting`, empty
+        :class:`~toolguard.decision_model.vocabulary.UnrecognizedFallbackSetting`, empty
         when every fallback setting is valid or unset.
     """
     return tuple(config.unrecognized_fallback_settings())
@@ -282,7 +285,7 @@ def _detect_conflicts(config: Configuration):
     Detect both static and dynamic configuration conflicts.
 
     The dynamic-conflict scan reads the same log directory the PreToolUse
-    hook writes to (:func:`~toolguard.env_config.get_env_config`, honouring
+    hook writes to (:func:`~toolguard.configuration.env_config.get_env_config`, honouring
     ``TOOLGUARD_LOG_DIR``) rather than assuming ``project_root/logs`` --
     otherwise setting that variable silently disables the nag.
 
@@ -317,18 +320,18 @@ class ShadowStatus:
     Attributes:
         checkout_root: The active project's root, when it IS a toolguard
             source checkout (see
-            :func:`~toolguard.install_provenance.source_checkout_root`);
+            :func:`~toolguard.install.install_provenance.source_checkout_root`);
             ``None`` when the gate failed (nothing else here is populated).
         running_from_checkout: ``True`` when the toolguard copy that produced
             THIS ``toolguard-session-start`` invocation is that SAME
             checkout -- genuine live shadowing, e.g. via ``PYTHONPATH`` --
             rather than a properly installed distribution.
         installed_root: The installed distribution's package root (via
-            :func:`~toolguard.install_provenance.installed_distribution_root`),
+            :func:`~toolguard.install.install_provenance.installed_distribution_root`),
             or ``None`` when none was found.
         stale: ``True`` only when :attr:`checkout_root` is confirmed clean
             (git) AND its content hash differs from :attr:`installed_root`'s
-            -- see :func:`~toolguard.install_provenance.stale_install_report`.
+            -- see :func:`~toolguard.install.install_provenance.stale_install_report`.
     """
 
     checkout_root: Optional[Path]
@@ -349,7 +352,7 @@ def _detect_shadow_status(config: Configuration) -> ShadowStatus:
     Gated on the active project (``config.project_root``) being a toolguard
     source checkout: a session in an unrelated repo has no working tree to
     compare against, so this returns :data:`_EMPTY_SHADOW_STATUS` immediately
-    when the gate fails. :func:`~toolguard.install_provenance.source_checkout_root`
+    when the gate fails. :func:`~toolguard.install.install_provenance.source_checkout_root`
     is passed the PACKAGE directory (``project_root / "toolguard"``), not the
     project root.
     """
@@ -375,6 +378,27 @@ def _detect_shadow_status(config: Configuration) -> ShadowStatus:
         installed_root=installed_root,
         stale=stale_report.is_stale,
     )
+
+
+def _run_auto_migration(config: Configuration) -> bool:
+    """
+    Migrate divergent permissions into the toolguard config, if configured.
+
+    This runs here rather than in the hook (TOO-78): the migration workflow
+    reports to stdout, which for the hook is the channel carrying its JSON
+    decision. Here stdout is a human summary Claude Code takes as context, so
+    the report is harmless and arguably useful. The once-a-day throttle is
+    unchanged and lives in :func:`~toolguard.configuration.auto_migrate.run_auto_migration`,
+    so several sessions in one day still migrate at most once.
+
+    A delay costs little: until migration runs, the patterns still take effect
+    from Claude's own settings -- they are merely not yet visible to someone
+    reading the toolguard config.
+    """
+    project_root = config.project_root
+    if project_root is None:
+        return False
+    return run_auto_migration_for_config(project_root, config)
 
 
 def _build_session_start_argparser() -> argparse.ArgumentParser:
@@ -460,6 +484,7 @@ def main() -> None:
         unrecognized_fallbacks = _run_checker(
             "fallback", lambda: _detect_unrecognized_fallbacks(config), ()
         )
+        _run_checker("auto-migration", lambda: _run_auto_migration(config), False)
 
         if (
             static_conflict is not None

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from toolguard.config import Configuration, Provenance
+from toolguard.configuration.config import Configuration, Provenance
 from toolguard.tools.config_access import with_layer_rules_replaced
 
 # The intent labels an EditProposal may carry, describing WHY the edit set exists.
@@ -133,7 +133,7 @@ def apply_edits(config: Configuration, proposals: List[EditProposal]) -> Configu
 
     Every :class:`RuleEdit` of every proposal is applied, in order, by composing
     :func:`~toolguard.tools.config_access.with_layer_rules_replaced`.  Nothing is
-    written to disk; the result is a synthetic :class:`~toolguard.config.Configuration`
+    written to disk; the result is a synthetic :class:`~toolguard.configuration.config.Configuration`
     suitable for as-if-enacted analysis.
 
     An edit can miss silently.  An unmatched ``provenance`` leaves the config
@@ -147,7 +147,7 @@ def apply_edits(config: Configuration, proposals: List[EditProposal]) -> Configu
         proposals: The edit proposals to enact, applied in list order.
 
     Returns:
-        A new :class:`~toolguard.config.Configuration`, or ``config`` itself when no
+        A new :class:`~toolguard.configuration.config.Configuration`, or ``config`` itself when no
         edit matched a layer.
     """
     result = config
@@ -170,7 +170,7 @@ def apply_edits(config: Configuration, proposals: List[EditProposal]) -> Configu
 
 
 def _provenance_to_dict(provenance: Provenance) -> Dict[str, Any]:
-    """Serialize a :class:`~toolguard.config.Provenance` to a round-trippable dict."""
+    """Serialize a :class:`~toolguard.configuration.config.Provenance` to a round-trippable dict."""
     return {
         "level": provenance.level,
         "source_type": provenance.source_type,
@@ -181,7 +181,7 @@ def _provenance_to_dict(provenance: Provenance) -> Dict[str, Any]:
 
 
 def _provenance_from_dict(data: Dict[str, Any]) -> Provenance:
-    """Reconstruct a :class:`~toolguard.config.Provenance` from :func:`_provenance_to_dict`."""
+    """Reconstruct a :class:`~toolguard.configuration.config.Provenance` from :func:`_provenance_to_dict`."""
     return Provenance(
         level=data["level"],
         source_type=data["source_type"],

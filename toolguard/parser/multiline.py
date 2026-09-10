@@ -58,12 +58,12 @@ from toolguard.parser.command_extractor import (  # noqa: E402, F401
 )
 
 # Used directly below, not merely re-exported: the lift here mints
-# _LiftedHeredocs, and _process_heredocs hands it to command_extractor's
+# LiftedHeredocs, and _process_heredocs hands it to command_extractor's
 # sink attribution across the module boundary.
 from toolguard.parser.command_extractor import (  # noqa: E402
-    _LiftedHeredocs,
-    _UnattributableHeredocError,
-    _attribute_and_substitute,
+    LiftedHeredocs,
+    UnattributableHeredocError,
+    attribute_and_substitute,
 )
 from toolguard.parser import bash_parser  # noqa: E402
 
@@ -264,7 +264,7 @@ def _placeholder(prefix: str, idx: int) -> str:
     return f"{prefix}{idx}__"
 
 
-def _lift_heredocs(lines: List[str]) -> _LiftedHeredocs:
+def _lift_heredocs(lines: List[str]) -> LiftedHeredocs:
     """Replace each heredoc redirection with an opaque placeholder, blind to its sink.
 
     For each line, finds its heredoc specs (:func:`_find_heredocs_in_line`),
@@ -337,7 +337,7 @@ def _lift_heredocs(lines: List[str]) -> _LiftedHeredocs:
         result_lines.append(modified_line)
         i = cursor
 
-    return _LiftedHeredocs(lines=result_lines, bodies=bodies, prefix=prefix)
+    return LiftedHeredocs(lines=result_lines, bodies=bodies, prefix=prefix)
 
 
 def _process_heredocs(lines: List[str]) -> List[str]:
@@ -357,10 +357,10 @@ def _process_heredocs(lines: List[str]) -> List[str]:
         New list of logical lines with heredoc bodies removed or spliced in.
 
     Raises:
-        _UnattributableHeredocError: a placeholder cannot be traced to any
+        UnattributableHeredocError: a placeholder cannot be traced to any
             command -- the caller floors this to ASK rather than guessing.
     """
-    return _attribute_and_substitute(_lift_heredocs(lines))
+    return attribute_and_substitute(_lift_heredocs(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +432,7 @@ def extract_structured(
     lines = text.split("\n")
     try:
         lines = _process_heredocs(lines)
-    except _UnattributableHeredocError as e:
+    except UnattributableHeredocError as e:
         logger.warning(
             "Heredoc sink attribution failed for command (after pre-pass): %s - %s",
             text[:100],

@@ -1,0 +1,158 @@
+digraph toolguard {
+    rankdir=TB;
+    newrank=true;
+    compound=true;
+    concentrate=false;
+    splines=ortho;
+    nodesep=0.25;
+    ranksep=0.6;
+    node [shape=box, style="filled,rounded", fontname="Helvetica", fontsize=10];
+    edge [color="#666666", arrowsize=0.7];
+    graph [fontname="Helvetica", fontsize=11, style=filled, color="#cccccc", fillcolor="#fbfbf3"];
+    subgraph cluster_top_level {
+        label="top_level";
+        fillcolor="#f4f4ea";
+        hook [label="hook", fillcolor="#cfe2f3"];
+        session_start [label="session_start", fillcolor="#cfe2f3"];
+        subagent [label="subagent", fillcolor="#cfe2f3"];
+        api [label="api", fillcolor="#cfe2f3"];
+    }
+    subgraph cluster_decision_machinery {
+        label="decision machinery";
+        fillcolor="#f4f4ea";
+        subgraph cluster_decision_model {
+            label="decision_model/";
+            fillcolor="#cfe8dc";
+            decision_model_rule_entry [label="rule_entry", fillcolor="#cfe8dc"];
+            decision_model_vocabulary [label="vocabulary", fillcolor="#cfe8dc"];
+        }
+        subgraph cluster_engine {
+            label="engine/";
+            fillcolor="#f4cccc";
+            engine_compound [label="compound", fillcolor="#f4cccc"];
+            engine_file_matching [label="file_matching", fillcolor="#f4cccc"];
+            engine_permission_resolution [label="permission_resolution", fillcolor="#f4cccc"];
+            engine_permissions [label="permissions", fillcolor="#f4cccc"];
+            engine_resolve [label="resolve", fillcolor="#f4cccc"];
+        }
+        subgraph cluster_parser {
+            label="parser/";
+            fillcolor="#f4cccc";
+            parser_bash_parser [label="bash_parser", fillcolor="#f4cccc"];
+            parser_command_extractor [label="command_extractor", fillcolor="#f4cccc"];
+            parser_command_model [label="command_model", fillcolor="#f4cccc"];
+            parser_multiline [label="multiline", fillcolor="#f4cccc"];
+        }
+    }
+    subgraph cluster_configuration {
+        label="configuration/";
+        fillcolor="#fce5cd";
+        configuration_auto_migrate [label="auto_migrate", fillcolor="#fce5cd"];
+        configuration_config [label="config", fillcolor="#fce5cd"];
+        configuration_config_divergence [label="config_divergence", fillcolor="#fce5cd"];
+        configuration_config_types [label="config_types", fillcolor="#fce5cd"];
+        configuration_config_validation [label="config_validation", fillcolor="#fce5cd"];
+        configuration_config_write_guard [label="config_write_guard", fillcolor="#fce5cd"];
+        configuration_env_config [label="env_config", fillcolor="#fce5cd"];
+        configuration_permission_migration [label="permission_migration", fillcolor="#fce5cd"];
+        configuration_rule_sort [label="rule_sort", fillcolor="#fce5cd"];
+    }
+    subgraph cluster_foundation {
+        label="foundation/";
+        fillcolor="#d0e0e3";
+        foundation_ambient [label="ambient", fillcolor="#d0e0e3"];
+        foundation_constants [label="constants", fillcolor="#d0e0e3"];
+        foundation_file_lock [label="file_lock", fillcolor="#d0e0e3"];
+        foundation_invocation [label="invocation", fillcolor="#d0e0e3"];
+        foundation_issues [label="issues", fillcolor="#d0e0e3"];
+        foundation_normalization [label="normalization", fillcolor="#d0e0e3"];
+        foundation_once_per [label="once_per", fillcolor="#d0e0e3"];
+        foundation_once_per_store [label="once_per_store", fillcolor="#d0e0e3"];
+        foundation_path_utils [label="path_utils", fillcolor="#d0e0e3"];
+        foundation_patterns [label="patterns", fillcolor="#d0e0e3"];
+        foundation_toml_scan [label="toml_scan", fillcolor="#d0e0e3"];
+        foundation_tool_spec [label="tool_spec", fillcolor="#d0e0e3"];
+    }
+    subgraph cluster_install {
+        label="install/";
+        fillcolor="#d9ead3";
+        install__git [label="_git", fillcolor="#d9ead3"];
+        install_install_provenance [label="install_provenance", fillcolor="#d9ead3"];
+    }
+    subgraph cluster_integration {
+        label="integration/";
+        fillcolor="#d9d2e9";
+        integration_claude_code_contract [label="claude_code_contract", fillcolor="#d9d2e9"];
+    }
+    subgraph cluster_observability {
+        label="observability/";
+        fillcolor="#fff2cc";
+        observability_auto_mode_trace [label="auto_mode_trace", fillcolor="#fff2cc"];
+        observability_error_log [label="error_log", fillcolor="#fff2cc"];
+        observability_error_reporter [label="error_reporter", fillcolor="#fff2cc"];
+        observability_log_writer [label="log_writer", fillcolor="#fff2cc"];
+        observability_session_warnings [label="session_warnings", fillcolor="#fff2cc"];
+    }
+
+    api -> configuration_config;
+    api -> engine_resolve;
+    configuration_auto_migrate -> configuration_permission_migration;
+    configuration_config -> configuration_config_types;
+    configuration_config -> configuration_config_validation;
+    configuration_config -> foundation_path_utils;
+    configuration_config -> foundation_toml_scan;
+    configuration_config -> observability_error_reporter;
+    configuration_config_divergence -> configuration_config;
+    configuration_config_divergence -> foundation_once_per;
+    configuration_config_types -> decision_model_vocabulary;
+    configuration_config_validation -> decision_model_rule_entry;
+    configuration_config_validation -> foundation_patterns;
+    configuration_env_config -> foundation_path_utils;
+    configuration_env_config -> observability_error_reporter;
+    configuration_permission_migration -> configuration_config_divergence;
+    configuration_permission_migration -> configuration_config_write_guard;
+    configuration_permission_migration -> configuration_rule_sort;
+    configuration_permission_migration -> foundation_file_lock;
+    configuration_rule_sort -> decision_model_rule_entry;
+    configuration_rule_sort -> foundation_toml_scan;
+    decision_model_rule_entry -> foundation_constants;
+    decision_model_rule_entry -> foundation_issues;
+    decision_model_vocabulary -> decision_model_rule_entry;
+    engine_compound -> engine_permissions;
+    engine_compound -> parser_multiline;
+    engine_file_matching -> engine_permissions;
+    engine_permission_resolution -> engine_file_matching;
+    engine_permissions -> decision_model_vocabulary;
+    engine_permissions -> foundation_patterns;
+    engine_resolve -> engine_compound;
+    engine_resolve -> engine_permission_resolution;
+    engine_resolve -> foundation_invocation;
+    foundation_constants -> foundation_tool_spec;
+    foundation_normalization -> foundation_ambient;
+    foundation_once_per -> foundation_once_per_store;
+    foundation_once_per_store -> foundation_ambient;
+    foundation_path_utils -> foundation_ambient;
+    foundation_patterns -> foundation_normalization;
+    foundation_tool_spec -> integration_claude_code_contract;
+    hook -> api;
+    hook -> configuration_config_divergence;
+    hook -> configuration_env_config;
+    hook -> observability_auto_mode_trace;
+    hook -> observability_log_writer;
+    hook -> observability_session_warnings;
+    hook -> subagent;
+    install__git -> foundation_constants;
+    install_install_provenance -> foundation_ambient;
+    install_install_provenance -> install__git;
+    observability_error_log -> foundation_ambient;
+    observability_error_reporter -> observability_error_log;
+    observability_log_writer -> foundation_path_utils;
+    observability_session_warnings -> observability_error_reporter;
+    parser_command_extractor -> decision_model_vocabulary;
+    parser_command_extractor -> parser_bash_parser;
+    parser_command_extractor -> parser_command_model;
+    parser_multiline -> parser_command_extractor;
+    session_start -> configuration_auto_migrate;
+    session_start -> configuration_env_config;
+    session_start -> install_install_provenance;
+}

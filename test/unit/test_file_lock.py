@@ -1,5 +1,5 @@
 """
-Unit tests for toolguard.file_lock's exclusive() context manager: single-process
+Unit tests for toolguard.foundation.file_lock's exclusive() context manager: single-process
 acquire/release, the failure modes that all collapse into LockUnavailable, the
 timeout budget (measured on a fake clock), backend selection, the Windows
 backend (reachable only by patching -- this suite runs on Linux), and real
@@ -13,7 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import file_lock
+from toolguard.foundation import file_lock
 
 from test.unit._subprocess_harness import run_child, wait_for_path
 
@@ -457,7 +457,7 @@ class TestBackendSelection(unittest.TestCase):
 _PRELUDE = (
     "import sys, time\n"
     "from pathlib import Path\n"
-    "from toolguard import file_lock\n"
+    "from toolguard.foundation import file_lock\n"
     "lock_path = Path(sys.argv[1])\n"
 )
 

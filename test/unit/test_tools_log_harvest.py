@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterator, List
 from unittest.mock import MagicMock, patch
 
-from toolguard import error_reporter
+from toolguard.observability import error_reporter
 
 
 def _write_log(log_dir: Path, filename: str, content: str) -> Path:

@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard.tool_spec import (
+from toolguard.foundation.tool_spec import (
     BUILTIN_TOOLS,
     KNOWN_TOOL_NAMES,
     TOOLS_BY_NAME,

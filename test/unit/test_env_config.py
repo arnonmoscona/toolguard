@@ -8,8 +8,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import ambient, error_reporter
-from toolguard.env_config import (
+from toolguard.foundation import ambient
+from toolguard.observability import error_reporter
+from toolguard.configuration.env_config import (
     find_project_root,
     get_bool_env,
     get_env_config,
@@ -663,7 +664,9 @@ class TestGetEnvConfig(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             with clean_env():
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = Path(tmpdir)
 
                     config = get_env_config()
@@ -706,7 +709,8 @@ class TestGetEnvConfig(unittest.TestCase):
                 # root reaches open() through __index__ and closes a file
                 # descriptor instead of failing the assertion.
                 with patch(
-                    "toolguard.env_config.find_project_root", return_value=None
+                    "toolguard.configuration.env_config.find_project_root",
+                    return_value=None,
                 ) as mock_find:
                     config = get_env_config()
 
@@ -743,7 +747,7 @@ class TestGetEnvConfig(unittest.TestCase):
             )
             with clean_env():
                 with patch(
-                    "toolguard.env_config.find_project_root",
+                    "toolguard.configuration.env_config.find_project_root",
                     return_value=Path(tmpdir),
                 ) as mock_find:
                     config = get_env_config(start_dir=Path(tmpdir))
@@ -762,7 +766,7 @@ class TestGetEnvConfig(unittest.TestCase):
         with TemporaryDirectory() as target, TemporaryDirectory() as other:
             with clean_env(TOOLGUARD_PROJECT_ROOT=other):
                 with patch(
-                    "toolguard.env_config.find_project_root",
+                    "toolguard.configuration.env_config.find_project_root",
                     return_value=Path(target),
                 ) as mock_find:
                     config = get_env_config(start_dir=Path(target))
@@ -782,7 +786,8 @@ class TestGetEnvConfig(unittest.TestCase):
 
             with clean_env():
                 with patch(
-                    "toolguard.env_config.find_project_root", return_value=None
+                    "toolguard.configuration.env_config.find_project_root",
+                    return_value=None,
                 ) as mock_find:
                     config = get_env_config(start_dir=start)
 
@@ -800,7 +805,9 @@ class TestGetEnvConfig(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir) / "mylogs"
             with clean_env(TOOLGUARD_LOG_DIR=str(log_dir)):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = Path(tmpdir)
 
                     config = get_env_config()
@@ -818,7 +825,9 @@ class TestGetEnvConfig(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             with clean_env(TOOLGUARD_LOG_DIR="custom/logs"):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = Path(tmpdir)
 
                     config = get_env_config()
@@ -842,7 +851,9 @@ class TestGetEnvConfig(unittest.TestCase):
             project_root.mkdir()
 
             with clean_env(HOME=str(home), TOOLGUARD_LOG_DIR="~/mylogs"):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = project_root
 
                     config = get_env_config()
@@ -872,7 +883,9 @@ class TestGetEnvConfig(unittest.TestCase):
 
             with clean_env():
                 with ambient.active(facts):
-                    with patch("toolguard.env_config.find_project_root") as mock_find:
+                    with patch(
+                        "toolguard.configuration.env_config.find_project_root"
+                    ) as mock_find:
                         mock_find.return_value = project_root
 
                         config = get_env_config()
@@ -890,7 +903,9 @@ class TestGetEnvConfig(unittest.TestCase):
             (project_root / ".env").write_text("TOOLGUARD_LOG_DIR=from_env_file\n")
 
             with clean_env():
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = project_root
 
                     config = get_env_config()
@@ -913,7 +928,9 @@ class TestGetEnvConfig(unittest.TestCase):
             (project_root / ".env").write_text("TOOLGUARD_LOG_DIR=from_env_file\n")
 
             with clean_env(TOOLGUARD_LOG_DIR="from_environ"):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = project_root
 
                     config = get_env_config()
@@ -933,7 +950,9 @@ class TestGetEnvConfig(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             with clean_env(TOOLGUARD_LOGGING_ENABLED="false"):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = Path(tmpdir)
 
                     config = get_env_config()
@@ -951,7 +970,9 @@ class TestGetEnvConfig(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             with clean_env(TOOLGUARD_EXTENDED_SYNTAX="false"):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = Path(tmpdir)
 
                     config = get_env_config()
@@ -969,7 +990,9 @@ class TestGetEnvConfig(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             with clean_env(TOOLGUARD_CREATE_LOG_DIR="true"):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = Path(tmpdir)
 
                     config = get_env_config()
@@ -992,7 +1015,9 @@ class TestGetEnvConfig(unittest.TestCase):
             (src_dir / ".env").write_text("TOOLGUARD_LOGGING_ENABLED=false\n")
 
             with clean_env(TOOLGUARD_SOURCE_ROOT="src"):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = project_root
 
                     config = get_env_config()
@@ -1017,7 +1042,9 @@ class TestGetEnvConfig(unittest.TestCase):
             )
 
             with clean_env():
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = project_root
 
                     config = get_env_config()
@@ -1040,7 +1067,9 @@ class TestGetEnvConfig(unittest.TestCase):
             env_file.write_text("TOOLGUARD_LOGGING_ENABLED=false\n")
 
             with clean_env(TOOLGUARD_LOGGING_ENABLED="true"):
-                with patch("toolguard.env_config.find_project_root") as mock_find:
+                with patch(
+                    "toolguard.configuration.env_config.find_project_root"
+                ) as mock_find:
                     mock_find.return_value = project_root
 
                     config = get_env_config()
@@ -1062,7 +1091,8 @@ class TestGetEnvConfig(unittest.TestCase):
 
             with clean_env():
                 with patch(
-                    "toolguard.env_config.find_project_root", return_value=None
+                    "toolguard.configuration.env_config.find_project_root",
+                    return_value=None,
                 ) as mock_find:
                     with patch("pathlib.Path.cwd", return_value=fallback) as mock_cwd:
                         config = get_env_config()
@@ -1117,7 +1147,8 @@ class TestRelativeProjectRootAnchoring(unittest.TestCase):
             with clean_env():
                 with ambient.active(facts):
                     with patch(
-                        "toolguard.env_config.find_project_root", return_value=None
+                        "toolguard.configuration.env_config.find_project_root",
+                        return_value=None,
                     ):
                         config = get_env_config(start_dir=Path("nested/project"))
 

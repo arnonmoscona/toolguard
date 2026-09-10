@@ -14,8 +14,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-from toolguard import env_config
-from toolguard.config import (
+from toolguard.configuration import env_config
+from toolguard.configuration.config import (
     Configuration,
     Provenance,
     TakeoverConfig,

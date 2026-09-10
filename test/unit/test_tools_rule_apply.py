@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard.config import Provenance
-from toolguard.config_write_guard import ConfigWriteVerificationError
+from toolguard.configuration.config import Provenance
+from toolguard.configuration.config_write_guard import ConfigWriteVerificationError
 from toolguard.tools.consolidate import ConsolidationProposal, SafetyResult
 from toolguard.tools.rule_apply import (
     _read_raw_permissions,

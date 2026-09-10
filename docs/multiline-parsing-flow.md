@@ -1,9 +1,10 @@
 # `multiline.py`'s pipeline: reading the flow
 
-TOO-45 ticket 105. [technical-notes.md](../technical-notes.md#lexical-pre-pass-vs-grammar)
+**Audience:** anyone reading or changing `multiline.py`.
+[technical-notes.md](../technical-notes.md#lexical-pre-pass-vs-grammar)
 covers why this pre-pass exists and how it fits the wider architecture; this page is the
 step-by-step flow inside `extract_structured` itself, which the module's own docstring lists
-but does not diagram. Each function's own docstring is still the source of truth for its exact
+but does not diagram. It is the design record for TOO-45 ticket 105. Each function's own docstring is still the source of truth for its exact
 quoting model and known limitations -- this page is the map between them, not a replacement.
 
 ## The pipeline

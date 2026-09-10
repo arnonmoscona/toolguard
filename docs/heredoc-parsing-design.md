@@ -1,6 +1,6 @@
 # Heredoc parsing: lift lexically, decide from the parse tree
 
-TOO-45 ticket 98. [technical-notes.md](../technical-notes.md#heredocs-the-sink-sentinel-and-executor-classification) and [permission-patterns.md](permission-patterns.md#heredocs-and-the-__heredoc_to_sink__-sentinel) describe the resulting behaviour; this page is why it is shaped the way it is.
+**Audience:** anyone changing heredoc handling in the parser. [technical-notes.md](../technical-notes.md#heredocs-the-sink-sentinel-and-executor-classification) and [permission-patterns.md](permission-patterns.md#heredocs-and-the-__heredoc_to_sink__-sentinel) describe the resulting behaviour; this page is why it is shaped the way it is, and it is the design record for TOO-45 ticket 98.
 
 ## What is forced
 

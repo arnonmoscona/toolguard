@@ -1,15 +1,15 @@
 """
-Shared test isolation for toolguard.once_per_store._STORE_PATH.
+Shared test isolation for toolguard.foundation.once_per_store._STORE_PATH.
 
 The degraded-notice registry needs no separate reset here: it lives on each
-:class:`~toolguard.once_per.OncePer` instance, not as shared module state.
+:class:`~toolguard.foundation.once_per.OncePer` instance, not as shared module state.
 """
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import once_per_store
+from toolguard.foundation import once_per_store
 
 
 class IsolatedStoreMixin:

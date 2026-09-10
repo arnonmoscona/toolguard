@@ -28,8 +28,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from toolguard import ambient
-from toolguard.constants import (
+from toolguard.foundation import ambient
+from toolguard.foundation.constants import (
     BUILTIN_TOOLS,
     STATUS_ERROR,
     STATUS_EXECUTED,
@@ -37,7 +37,7 @@ from toolguard.constants import (
     STATUS_UNKNOWN,
 )
 from toolguard.subagent import parse_jsonl_lines
-from toolguard.tool_spec import TOOLS_BY_NAME
+from toolguard.foundation.tool_spec import TOOLS_BY_NAME
 from toolguard.tools.log_harvest import LogEntry
 
 
@@ -211,7 +211,7 @@ def _command_for_tool(tool: str, tool_input: Dict[str, Any]) -> Optional[str]:
 
     Args:
         tool: A registered tool name, whose
-            :class:`~toolguard.tool_spec.ToolSpec` names the input key to
+            :class:`~toolguard.foundation.tool_spec.ToolSpec` names the input key to
             read.
         tool_input: The ``input`` dict of the ``tool_use`` item.
 
@@ -237,7 +237,7 @@ def harvest_transcript_file(path: Path) -> List[LogEntry]:
     Parse a single transcript JSONL file into :class:`LogEntry` records.
 
     One entry per ``tool_use`` item naming a tool in
-    :data:`~toolguard.constants.BUILTIN_TOOLS` -- the four tools governed by
+    :data:`~toolguard.foundation.constants.BUILTIN_TOOLS` -- the four tools governed by
     default, a narrower set than the tools toolguard recognises. Each is
     joined to its ``tool_result`` for a status; items with no parseable
     timestamp or no command/path are dropped.

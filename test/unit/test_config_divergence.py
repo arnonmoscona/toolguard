@@ -12,21 +12,22 @@ from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
-from toolguard import error_reporter, once_per_store
-from toolguard.config import (
+from toolguard.foundation import once_per_store
+from toolguard.observability import error_reporter
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,
     load_configuration,
 )
-from toolguard.config_divergence import (
+from toolguard.configuration.config_divergence import (
     DIVERGENCE_WARNING,
     check_and_warn_divergence,
     find_divergent_patterns,
     get_native_permissions,
     get_toolguard_permissions,
 )
-from toolguard.once_per_store import ClaimStatus
+from toolguard.foundation.once_per_store import ClaimStatus
 
 from test.unit._config_isolation import ConfigIsolationMixin
 from test.unit._once_per_isolation import IsolatedStoreMixin as _IsolatedStoreMixin
@@ -723,7 +724,7 @@ class TestCheckAndWarnDivergence(_DivergenceFixture, unittest.TestCase):
         self.write_native(allow=["Bash(git push:*)"])
         spy = MagicMock(wraps=load_configuration)
 
-        with patch("toolguard.config_divergence.load_configuration", spy):
+        with patch("toolguard.configuration.config_divergence.load_configuration", spy):
             first = check_and_warn_divergence(self.project, _NO_TAKEOVER)
             self.assertIn("Bash(git push:*)", first.divergent_patterns)
 
@@ -974,7 +975,7 @@ class TestCheckAndWarnDivergence(_DivergenceFixture, unittest.TestCase):
         Given a project with a divergent pattern and sqlite3 unavailable
         When check_and_warn_divergence runs
         Then it still reports the divergence and prints the warning (a
-             warning fails OPEN -- see toolguard.once_per.OncePer.warn),
+             warning fails OPEN -- see toolguard.foundation.once_per.OncePer.warn),
              plus a one-time notice explaining that it can no longer be
              throttled to once per day
         """
@@ -1004,7 +1005,8 @@ class TestCheckAndWarnDivergenceExceptionSafety(_DivergenceFixture, unittest.Tes
         boom = RuntimeError("malformed config file")
 
         with patch(
-            "toolguard.config_divergence.load_configuration", side_effect=boom
+            "toolguard.configuration.config_divergence.load_configuration",
+            side_effect=boom,
         ) as failing_load:
             with self.assertRaises(RuntimeError):
                 check_and_warn_divergence(self.project, _NO_TAKEOVER)
@@ -1073,8 +1075,8 @@ class TestConcurrentDivergenceWarning(_DivergenceFixture, unittest.TestCase):
         script = (
             "import sys, time\n"
             "from pathlib import Path\n"
-            "from toolguard import once_per_store\n"
-            "from toolguard.config_divergence import check_and_warn_divergence\n"
+            "from toolguard.foundation import once_per_store\n"
+            "from toolguard.configuration.config_divergence import check_and_warn_divergence\n"
             "once_per_store._STORE_PATH = Path(sys.argv[3])\n"
             "project_root = Path(sys.argv[1])\n"
             "barrier = Path(sys.argv[2])\n"

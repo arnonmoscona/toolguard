@@ -7,8 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from toolguard import ambient
-from toolguard.permissions import (
+from toolguard.foundation import ambient
+from toolguard.engine.permissions import (
     normalize_path_in_command,
     contains_path_component,
     match_command,
@@ -945,7 +945,7 @@ class TestMatchCommandUnderASymlinkedHomeDirectory(unittest.TestCase):
     A rule keeps matching whichever spelling of a symlinked location it was written in.
 
     Isolation exception (`.claude/rules/test-config-isolation.md`): match_command never
-    reaches toolguard.config's discovery path, so ConfigIsolationMixin does not apply;
+    reaches toolguard.configuration.config's discovery path, so ConfigIsolationMixin does not apply;
     the only anchor here is Path.home(), read by normalization.
     """
 
@@ -1013,8 +1013,8 @@ class TestMatchCommandAcrossTheTwoHomeSpellings(unittest.TestCase):
     cross in one direction only.
 
     Isolation exception (`.claude/rules/test-config-isolation.md`): match_command never
-    reaches toolguard.config's discovery path, so ConfigIsolationMixin does not apply;
-    the only anchor is the home directory, bound here through toolguard.ambient.
+    reaches toolguard.configuration.config's discovery path, so ConfigIsolationMixin does not apply;
+    the only anchor is the home directory, bound here through toolguard.foundation.ambient.
     """
 
     HOME = Path("/home/testuser")
@@ -1160,8 +1160,8 @@ class TestEveryPatternTypeCrossesTheTwoHomeSpellings(unittest.TestCase):
     [native] too, not only DEFAULT, and for granting rules as well as restricting ones.
 
     Isolation exception (`.claude/rules/test-config-isolation.md`): match_command never
-    reaches toolguard.config's discovery path, so ConfigIsolationMixin does not apply;
-    the only anchor is the home directory, bound here through toolguard.ambient.
+    reaches toolguard.configuration.config's discovery path, so ConfigIsolationMixin does not apply;
+    the only anchor is the home directory, bound here through toolguard.foundation.ambient.
     """
 
     HOME = Path("/home/testuser")

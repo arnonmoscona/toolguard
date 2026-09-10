@@ -1,4 +1,4 @@
-"""Unit tests for toolguard.install_provenance."""
+"""Unit tests for toolguard.install.install_provenance."""
 
 import importlib.metadata
 import os
@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from toolguard import install_provenance
+from toolguard.install import install_provenance
 
 _GIT = shutil.which("git")
 
@@ -104,11 +104,11 @@ class TestGoverningPackageRoot(unittest.TestCase):
         Given the real, installed toolguard package
         When governing_package_root runs
         Then it returns a directory literally named 'toolguard' holding
-        install_provenance.py itself
+        install_provenance.py in its install layer package
         """
         root = install_provenance.governing_package_root()
         self.assertEqual(root.name, "toolguard")
-        self.assertTrue((root / "install_provenance.py").is_file())
+        self.assertTrue((root / "install" / "install_provenance.py").is_file())
 
 
 class TestSourceCheckoutRoot(unittest.TestCase):
@@ -203,7 +203,9 @@ class TestSourceCheckoutRoot(unittest.TestCase):
         governing = install_provenance.governing_package_root()
         result = install_provenance.source_checkout_root()
         self.assertIsNotNone(result)
-        self.assertTrue((result / "toolguard" / "install_provenance.py").is_file())
+        self.assertTrue(
+            (result / "toolguard" / "install" / "install_provenance.py").is_file()
+        )
         self.assertEqual(result / governing.name, governing)
 
 
@@ -305,7 +307,7 @@ class TestGitSubtreeIsClean(unittest.TestCase):
     """_git_subtree_is_clean() -- the tri-state (True/False/None) cleanliness check."""
 
     # These patch install_provenance.subprocess.run, which reaches the call in
-    # toolguard._git.run_git only because both names are the ONE global
+    # toolguard.install._git.run_git only because both names are the ONE global
     # subprocess module object.
 
     def assert_git_asked_about(self, run, directory, subtree):

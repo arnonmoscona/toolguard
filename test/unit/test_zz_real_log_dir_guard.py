@@ -16,16 +16,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-import toolguard.error_log as error_log
-import toolguard.log_writer as log_writer
+import toolguard.observability.error_log as error_log
+import toolguard.observability.log_writer as log_writer
 from test.unit import (
     _real_log_dir_guard,
     _real_once_per_home_guard,
     _relative_receiver_resolve_guard,
 )
-from toolguard import once_per_store
-from toolguard.env_config import get_env_config
-from toolguard.once_per_store import ClaimStatus
+from toolguard.foundation import once_per_store
+from toolguard.configuration.env_config import get_env_config
+from toolguard.foundation.once_per_store import ClaimStatus
 
 #: Synthetic project root used by every call below. Never a real path, so a
 #: guard that failed to intercept could not silently reuse real state.
@@ -110,7 +110,7 @@ class TestRealLogDirGuardActuallyFires(unittest.TestCase):
     def test_guard_records_and_suppresses_a_real_dir_write_attempt(self):
         """
         Given the guard installed and an empty leak registry
-        When toolguard.log_writer.log_discovery is called with the REAL repo
+        When toolguard.observability.log_writer.log_discovery is called with the REAL repo
             logs/ directory as log_dir (simulating the TOO-19 regression)
         Then the call is recorded as a leak event and the discovery log file
             is NOT created in the real logs/ directory
@@ -202,7 +202,7 @@ class TestRealLogDirGuardActuallyFires(unittest.TestCase):
     def test_guard_fires_for_log_command_via_config_log_dir(self):
         """
         Given the guard installed and an empty leak registry
-        When toolguard.log_writer.log_command is called with a LogRecord and a
+        When toolguard.observability.log_writer.log_command is called with a LogRecord and a
             config dict whose log_dir is the REAL repo logs/ directory -- the
             shape toolguard.hook.main() uses, which pins that the guard's
             inspect.signature-based log_dir/config extraction resolves against
@@ -238,7 +238,7 @@ class TestRealLogDirGuardActuallyFires(unittest.TestCase):
         Given the guard installed, an empty leak registry, and
             once_per_store._STORE_PATH isolated to a tmp file (so the
             ~/.toolguard/-facing guard passes through and does not mask this one)
-        When toolguard.once_per_store.reap is called with the REAL repo logs/
+        When toolguard.foundation.once_per_store.reap is called with the REAL repo logs/
             directory as logs_dir -- reap is the one claim-store entry point
             that still takes a project logs_dir, so it is guarded here too
         Then the call is recorded as a leak event
@@ -273,7 +273,7 @@ class TestRealLogDirGuardWatchesThePathProductionWouldWrite(unittest.TestCase):
 
     def test_the_log_dir_env_config_resolves_for_this_repo_is_intercepted(self):
         """
-        Given toolguard.env_config's own log-directory resolution -- the anchor
+        Given toolguard.configuration.env_config's own log-directory resolution -- the anchor
             the TOO-19 leak went through -- run against this test file's own
             directory with TOOLGUARD_LOG_DIR blanked, so it resolves this
             repository's default log directory and nothing else
@@ -325,7 +325,7 @@ class TestRealSuppressionHomeGuardActuallyFires(unittest.TestCase):
     def test_guard_fires_for_claim_against_the_unpatched_real_store(self):
         """
         Given the guard installed and _STORE_PATH forced to the real, unisolated path
-        When toolguard.once_per_store.claim is called with a REAL (non-None) project
+        When toolguard.foundation.once_per_store.claim is called with a REAL (non-None) project
             -- claim(None, ...) short-circuits before touching storage, so it would
             pass even with the guard's install() deleted
         Then the call is recorded as a leak event, reports UNGUARANTEED (the
@@ -356,7 +356,7 @@ class TestRealSuppressionHomeGuardActuallyFires(unittest.TestCase):
     def test_guard_fires_for_release_against_the_unpatched_real_store(self):
         """
         Given the guard installed and _STORE_PATH forced to the real, unisolated path
-        When toolguard.once_per_store.release is called with a REAL (non-None)
+        When toolguard.foundation.once_per_store.release is called with a REAL (non-None)
             project -- release opens the store without ever creating it, so the
             recorded event is the only evidence it was intercepted
         Then the call is recorded as a leak event and the real database is untouched
@@ -383,7 +383,7 @@ class TestRealSuppressionHomeGuardActuallyFires(unittest.TestCase):
         Given the guard installed, _STORE_PATH forced to the real, unisolated
             path, and a tmp logs_dir so the sibling real-logs-dir guard passes
             through and does not mask this one
-        When toolguard.once_per_store.reap is called -- it is wrapped by BOTH
+        When toolguard.foundation.once_per_store.reap is called -- it is wrapped by BOTH
             guards, and this one wraps the outside
         Then the ~/.toolguard/-facing guard records the leak and the real
             database is untouched
@@ -407,7 +407,7 @@ class TestRealSuppressionHomeGuardActuallyFires(unittest.TestCase):
     def test_guard_fires_for_is_claimed_against_the_unpatched_real_store(self):
         """
         Given the guard installed and _STORE_PATH forced to the real, unisolated path
-        When toolguard.once_per_store.is_claimed is called with a REAL (non-None)
+        When toolguard.foundation.once_per_store.is_claimed is called with a REAL (non-None)
             project -- is_claimed(None, ...) short-circuits before touching
             storage, so it would pass even with the guard's install() deleted
         Then the call is recorded as a leak event and returns False

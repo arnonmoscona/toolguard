@@ -21,7 +21,7 @@ Design notes
   does, how many entries it appends, and when it does neither -- read-only,
   refused, or nothing to change -- is stated in that subcommand's own ``--help``.
 - Config and settings writes go through
-  :func:`~toolguard.config_write_guard.verified_write_config`, which parses the
+  :func:`~toolguard.configuration.config_write_guard.verified_write_config`, which parses the
   candidate text -- and, given the prior patterns, refuses a write that would drop
   one -- before writing it atomically.
 - TOML editing reuses ``write_toml_config`` (preserves everything outside the
@@ -44,24 +44,34 @@ from re import MULTILINE, compile as re_compile
 from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from toolguard import ambient
-from toolguard.claude_code_contract import PRE_TOOL_USE_EVENT, SESSION_START_EVENT
-from toolguard.config import load_config_file
-from toolguard.constants import (
+from toolguard.foundation import ambient
+from toolguard.integration.claude_code_contract import (
+    PRE_TOOL_USE_EVENT,
+    SESSION_START_EVENT,
+)
+from toolguard.configuration.config import load_config_file
+from toolguard.foundation.constants import (
     DECISION_ALLOW,
     DECISION_ASK,
     DECISION_DENY,
     FALLBACK_ALLOW_WITH_NO_WARNINGS,
     FALLBACK_ALLOW_WITH_WARNING,
 )
-from toolguard.config_write_guard import (
+from toolguard.configuration.config_write_guard import (
     ConfigWriteVerificationError,
     patterns_in_config_text,
     verified_write_config,
 )
-from toolguard.permission_migration import create_backup, write_toml_config
-from toolguard.rule_entry import RuleEntry, normalize_entries_preserving, real_patterns
-from toolguard.rule_sort import (
+from toolguard.configuration.permission_migration import (
+    create_backup,
+    write_toml_config,
+)
+from toolguard.decision_model.rule_entry import (
+    RuleEntry,
+    normalize_entries_preserving,
+    real_patterns,
+)
+from toolguard.configuration.rule_sort import (
     RuleEntryOrStr,
     find_section_boundaries,
     render_toml_entry,
@@ -70,13 +80,13 @@ from toolguard.tools.recommended_protections import required_hard_deny_patterns
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
-from toolguard.install_update import (
+from toolguard.install.install_update import (
     InstallKind,
     detect_install,
     local_remote_head,
     remote_head,
 )
-from toolguard.tool_spec import FILE_KIND_TOOLS
+from toolguard.foundation.tool_spec import FILE_KIND_TOOLS
 
 
 def _entry_pattern(entry: RuleEntryOrStr) -> str:
@@ -223,7 +233,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
     creating *path*'s parent directory if needed.
 
     Do NOT use this for a rule-bearing config or settings file:
-    :func:`~toolguard.config_write_guard.verified_write_config` does an
+    :func:`~toolguard.configuration.config_write_guard.verified_write_config` does an
     equivalent atomic write, but parses the candidate text first and, given
     ``expected_patterns``, catches silently-dropped rules.
     """
@@ -1820,7 +1830,7 @@ READ-ONLY: makes no backup and appends no journal entry.
 
 Reports three things, side by side:
   - binary install status: the install kind (git/local/unknown), via
-    toolguard.install_update.detect_install(), and whether a newer commit is
+    toolguard.install.install_update.detect_install(), and whether a newer commit is
     available upstream. A network-unreachable or undeterminable remote is
     reported plainly as "unknown" -- this subcommand never hangs or fails
     just because the remote could not be reached.
@@ -2404,7 +2414,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         The subcommand's own exit code -- ``0`` on success, ``2`` when it
         refuses -- or ``2`` for an :class:`InstallerError` (unmet
         precondition) or a
-        :class:`~toolguard.config_write_guard.ConfigWriteVerificationError`
+        :class:`~toolguard.configuration.config_write_guard.ConfigWriteVerificationError`
         (a config write refused as corrupt or pattern-dropping; the file on
         disk is untouched either way).
     """

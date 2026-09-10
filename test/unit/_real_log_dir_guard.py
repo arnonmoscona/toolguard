@@ -5,8 +5,8 @@ never receive a write from the test suite.
 A checklist alone (``.claude/rules/test-config-isolation.md``) did not
 prevent this leak the first time -- three tests missed it independently, one
 of them despite already using the sanctioned isolation mixin, because that
-mixin's scope covered ``toolguard.config``'s three discovery anchors and not
-``toolguard.env_config``'s separate, fourth one. Prose guidance is not
+mixin's scope covered ``toolguard.configuration.config``'s three discovery anchors and not
+``toolguard.configuration.env_config``'s separate, fourth one. Prose guidance is not
 self-enforcing; this module is the enforcement.
 
 A single test that snapshots the real ``logs/`` directory before the suite
@@ -34,7 +34,7 @@ DEFINING module, with a guard that:
 3. Otherwise calls straight through with no observable difference.
 
 Patching happens at the DEFINING module rather than at each importer, so
-that a later ``from toolguard.log_writer import log_command`` (e.g. inside
+that a later ``from toolguard.observability.log_writer import log_command`` (e.g. inside
 ``toolguard/hook.py``) binds directly to the guarded wrapper -- which is why
 ``install()`` must run, from ``test/unit/__init__.py``, before any test
 module (and therefore before ``toolguard.hook``) is ever imported. A
@@ -53,10 +53,10 @@ import inspect
 import traceback
 from pathlib import Path
 
-import toolguard.auto_mode_trace as auto_mode_trace
-import toolguard.error_log as error_log
-import toolguard.log_writer as log_writer
-import toolguard.once_per_store as once_per_store
+import toolguard.observability.auto_mode_trace as auto_mode_trace
+import toolguard.observability.error_log as error_log
+import toolguard.observability.log_writer as log_writer
+import toolguard.foundation.once_per_store as once_per_store
 
 #: The real repository's logs/ directory -- computed once, from this file's
 #: own location, so it works regardless of the process's cwd or invocation
@@ -137,7 +137,7 @@ def _guard_simple_log_dir_arg(func, param_name="log_dir"):
     Wrap a function whose log-directory argument is checked directly.
 
     *param_name* accommodates callables that don't use ``log_dir`` as the
-    parameter name (e.g. :mod:`toolguard.once_per_store`'s ``logs_dir``).
+    parameter name (e.g. :mod:`toolguard.foundation.once_per_store`'s ``logs_dir``).
     """
 
     @functools.wraps(func)

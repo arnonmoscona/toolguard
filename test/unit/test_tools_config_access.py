@@ -10,7 +10,7 @@ from typing import Optional as _Optional
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.config import (
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,
@@ -1228,7 +1228,7 @@ class TestRuleCommentExposureStructuredEntries(unittest.TestCase):
         Given a structured entry written across two physical lines with a
         '# NOSECURITY: reviewed multiline' comment on its own last line -- not
         valid TOML 1.0 (an inline table must be single-line; see
-        toolguard.rule_sort's top-of-file docstring), so the raw file fails to
+        toolguard.configuration.rule_sort's top-of-file docstring), so the raw file fails to
         parse
         When nosecurity_reason_for is called for that rule's pattern
         Then it returns None -- a parse failure degrades to "no comment

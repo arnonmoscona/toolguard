@@ -11,17 +11,23 @@ from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from unittest.mock import patch
 
-from toolguard.config import (
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,
     TakeoverConfig,
     TakeoverEnabledConflict,
 )
-from toolguard.claude_code_contract import PreToolUseEvent, read_pre_tool_use_event
-from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
-from toolguard.config_types import RuntimeVerdict, ToolPatternLayer
-from toolguard.rule_entry import RuleEntry
+from toolguard.integration.claude_code_contract import (
+    PreToolUseEvent,
+    read_pre_tool_use_event,
+)
+from toolguard.engine.compound import (
+    FALLBACK_ALLOW_PLACEHOLDER,
+    FALLBACK_DENY_PLACEHOLDER,
+)
+from toolguard.decision_model.vocabulary import RuntimeVerdict, ToolPatternLayer
+from toolguard.decision_model.rule_entry import RuleEntry
 from toolguard.hook import (
     FILE_PATH_TOOLS,
     _classify_fallback_cause,
@@ -34,18 +40,18 @@ from toolguard.hook import (
     load_file_path_patterns,
     main,
 )
-from toolguard.error_log import log_crash
-from toolguard.auto_mode_trace import (
+from toolguard.observability.error_log import log_crash
+from toolguard.observability.auto_mode_trace import (
     FALLBACK_CAUSE_NO_MATCH,
     FALLBACK_CAUSE_PARSE_FAILURE,
     FALLBACK_CAUSE_UNDECIDABLE,
     FALLBACK_CAUSE_UNKNOWN,
 )
-from toolguard.log_writer import LogRecord
-from toolguard.file_matching import decide_file_path_at_level_detailed
-from toolguard.resolve import resolve_bash_permission_detailed
-from toolguard.tool_spec import TOOLS_BY_NAME, ToolKind, ToolSpec
-from toolguard import ambient, once_per_store
+from toolguard.observability.log_writer import LogRecord
+from toolguard.engine.file_matching import decide_file_path_at_level_detailed
+from toolguard.engine.resolve import resolve_bash_permission_detailed
+from toolguard.foundation.tool_spec import TOOLS_BY_NAME, ToolKind, ToolSpec
+from toolguard.foundation import ambient, once_per_store
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 
@@ -81,7 +87,7 @@ _NO_TAKEOVER = TakeoverConfig(False, (), (), "deny")
 # Most classes here mock toolguard.hook.load_configuration() directly and
 # drive toolguard.hook.main() end-to-end (a few call hook functions
 # directly and never reach main()). main() calls
-# toolguard.env_config.get_env_config() unconditionally, before
+# toolguard.configuration.env_config.get_env_config() unconditionally, before
 # load_configuration() runs, to resolve TOOLGUARD_LOG_DIR for the
 # config-discovery diagnostic log -- unpatched, that resolves the real
 # process cwd (the repo root under `unittest discover`) and writes into
@@ -150,7 +156,7 @@ def _fake_config(
             return raw_path
 
         def permission_levels_with_provenance(self_inner, tool_name):
-            # toolguard.permission_resolution reads this directly, and builds
+            # toolguard.engine.permission_resolution reads this directly, and builds
             # its per-level pattern lists from the layer's entries,
             # not from the plain allow/deny tuples below -- so this fake must
             # carry a real ToolPatternLayer with entries, or every pattern
@@ -298,7 +304,7 @@ class TestHookToolGovernance(unittest.TestCase):
 
 
 class TestPermissionDecisionSurvivesSqlite3Unavailable(unittest.TestCase):
-    """Smoke test: hook.main() must not crash or degrade the permission decision when sqlite3 (toolguard.once_per_store) is unavailable."""
+    """Smoke test: hook.main() must not crash or degrade the permission decision when sqlite3 (toolguard.foundation.once_per_store) is unavailable."""
 
     def test_takeover_enabled_decision_still_resolves_with_sqlite3_unavailable(self):
         """
@@ -2211,7 +2217,7 @@ class TestStartupValidation(unittest.TestCase):
         """
         import tempfile
 
-        from toolguard.config import Configuration
+        from toolguard.configuration.config import Configuration
 
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "project"
@@ -2288,7 +2294,7 @@ class TestStartupValidation(unittest.TestCase):
         When _run_startup_validation runs
         Then log_warning is called once with that issue's message and corrective steps
         """
-        from toolguard.config import Issue
+        from toolguard.configuration.config import Issue
 
         issue = Issue("warning", "bad tool WebSearch", "remove it")
 
@@ -3022,7 +3028,7 @@ class TestAutoModeTrace(unittest.TestCase):
             below). fallback_cause='no_match' -- unlike matched_rule, this
             IS attributable here: strictest-wins picks whoami's own ask as
             the SINGLE decider (git status's allow is not stricter), so
-            _combine_strictest propagates whoami's own carried cause
+            combine_strictest propagates whoami's own carried cause
         """
         config = self._config(
             {
@@ -3239,7 +3245,7 @@ class TestAutoModeTrace(unittest.TestCase):
             no_match_fallback (cause='no_match') -- two DIFFERENT causes,
             neither leaf stricter than the other
         Then log_auto_mode_trace fires with fallback_cause='unknown' -- the
-            genuinely ambiguous case _combine_strictest's own docstring
+            genuinely ambiguous case combine_strictest's own docstring
             names: several allowed units with no single decider to
             attribute a cause to, the same ambiguity matched_rule/
             provenance already have for this shape
@@ -3308,7 +3314,7 @@ class TestClassifyFallbackCause(unittest.TestCase):
         Given a RuntimeVerdict with fallback_cause=None -- the genuinely
             ambiguous case (e.g. a multi-leaf compound where several
             allowed units would need to agree on a cause -- see
-            _combine_strictest's own docstring)
+            combine_strictest's own docstring)
         When _classify_fallback_cause classifies it
         Then it returns FALLBACK_CAUSE_UNKNOWN
         """
@@ -3394,7 +3400,7 @@ class TestHandleCommandToolReadsTargetFromRegisteredKey(unittest.TestCase):
                 TOOLS_BY_NAME["Bash"], payload_key="shell_input"
             )
         }
-        with patch.dict("toolguard.tool_spec.TOOLS_BY_NAME", rebound):
+        with patch.dict("toolguard.foundation.tool_spec.TOOLS_BY_NAME", rebound):
             verdict = _handle_command_tool(
                 _invocation(config=config, tool_input={"shell_input": "ls -la"})
             )
@@ -3446,7 +3452,7 @@ class TestEmptyGovernedToolsFailsClosedThroughMain(unittest.TestCase):
             "hook_event_name": "PreToolUse",
         }
         config = self._hard_deny_config()
-        with patch("toolguard.config.DEFAULT_GOVERNED_TOOLS", ()):
+        with patch("toolguard.configuration.config.DEFAULT_GOVERNED_TOOLS", ()):
             with patch("sys.stdin", StringIO(json.dumps(hook_input))):
                 with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
                     with patch(
@@ -3547,7 +3553,7 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
 
     @patch("toolguard.hook.log_command")
     @patch.dict(
-        "toolguard.tool_spec.TOOLS_BY_NAME",
+        "toolguard.foundation.tool_spec.TOOLS_BY_NAME",
         {
             "Read": ToolSpec(
                 name="Read",
@@ -3580,7 +3586,7 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
 
     @patch("toolguard.hook.log_command")
     @patch.dict(
-        "toolguard.tool_spec.TOOLS_BY_NAME",
+        "toolguard.foundation.tool_spec.TOOLS_BY_NAME",
         {
             "Read": ToolSpec(
                 name="Read",
@@ -3678,7 +3684,7 @@ class TestHookCrashCapture(unittest.TestCase):
     An unhandled exception hitting any of main()'s three except clauses
     must deny-and-continue AND write a full crash report (exception type,
     message, traceback, in-flight context) to ~/.toolguard/errors/ via
-    toolguard.error_log.log_crash.
+    toolguard.observability.error_log.log_crash.
     """
 
     def test_unexpected_exception_writes_crash_report(self):
@@ -3721,7 +3727,10 @@ class TestHookCrashCapture(unittest.TestCase):
                 # its log dir via require_project_root(), independent of
                 # Path.home() -- isolate it too, or this leaks into the real
                 # repo logs/ dir (see .claude/rules/test-config-isolation.md).
-                patch("toolguard.log_writer.require_project_root", return_value=home),
+                patch(
+                    "toolguard.observability.log_writer.require_project_root",
+                    return_value=home,
+                ),
             ):
                 with self.assertRaises(SystemExit) as ctx:
                     main()
@@ -3777,7 +3786,10 @@ class TestHookCrashCapture(unittest.TestCase):
                 patch("sys.stdout", new_callable=StringIO) as mock_stdout,
                 patch("sys.stderr", new_callable=StringIO) as mock_stderr,
                 patch("pathlib.Path.home", return_value=home),
-                patch("toolguard.log_writer.require_project_root", return_value=home),
+                patch(
+                    "toolguard.observability.log_writer.require_project_root",
+                    return_value=home,
+                ),
             ):
                 with self.assertRaises(SystemExit) as ctx:
                     main()
@@ -3832,7 +3844,10 @@ class TestHookCrashCapture(unittest.TestCase):
                 patch("sys.stdout", new_callable=StringIO) as mock_stdout,
                 patch("sys.stderr", new_callable=StringIO) as mock_stderr,
                 patch("pathlib.Path.home", return_value=home),
-                patch("toolguard.log_writer.require_project_root", return_value=home),
+                patch(
+                    "toolguard.observability.log_writer.require_project_root",
+                    return_value=home,
+                ),
             ):
                 with self.assertRaises(SystemExit) as ctx:
                     main()
@@ -3929,7 +3944,10 @@ class TestHookCrashCapture(unittest.TestCase):
                     side_effect=RuntimeError("boom from resolver"),
                 ),
                 patch("pathlib.Path.home", return_value=home),
-                patch("toolguard.log_writer.require_project_root", return_value=home),
+                patch(
+                    "toolguard.observability.log_writer.require_project_root",
+                    return_value=home,
+                ),
                 patch("toolguard.hook.log_crash") as mock_log_crash,
             ):
                 with self.assertRaises(SystemExit) as ctx:
@@ -3993,14 +4011,14 @@ class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
                     # Patching the accessor, not isolating config: only an
                     # ambient.home that raises produces the machine these tests
                     # are about.
-                    patch("toolguard.ambient.home", _homeless),
+                    patch("toolguard.foundation.ambient.home", _homeless),
                     # get_env_config() resolves before load_configuration(), so
                     # the Reporter falls back to a log dir the module-level
                     # TOOLGUARD_LOG_DIR isolation does not cover -- removing this
                     # patch as redundant trips _real_log_dir_guard (see
                     # .claude/rules/test-config-isolation.md).
                     patch(
-                        "toolguard.log_writer.require_project_root",
+                        "toolguard.observability.log_writer.require_project_root",
                         return_value=Path(tmpdir),
                     ),
                     # Spies on the real log_crash so a future refactor moving it

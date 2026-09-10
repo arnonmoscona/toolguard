@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Dict, List, Optional, Tuple
 
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.annotate import (
     TOOLGUARD_MARKER,
     _annotation_text,

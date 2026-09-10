@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard.log_writer import (
+from toolguard.observability.log_writer import (
     LOG_FORMAT_JSONLINES,
     LogRecord,
     log_command,
@@ -416,7 +416,7 @@ class TestLogging(unittest.TestCase):
         stderr_capture = io.StringIO()
         with contextlib.redirect_stderr(stderr_capture):
             with patch(
-                "toolguard.log_writer.require_project_root",
+                "toolguard.observability.log_writer.require_project_root",
                 side_effect=RuntimeError("no project root"),
             ) as mock_require_root:
                 log_command(LogRecord(command_str="git status", status="executed"))
@@ -1055,7 +1055,7 @@ class TestLogFormatGoldenFile(unittest.TestCase):
     def setUp(self):
         """Pin datetime.now() to a fixed instant."""
         self.fixed_now = datetime(2026, 1, 15, 10, 30, 0)
-        self.datetime_patcher = patch("toolguard.log_writer.datetime")
+        self.datetime_patcher = patch("toolguard.observability.log_writer.datetime")
         mock_datetime = self.datetime_patcher.start()
         mock_datetime.now.return_value = self.fixed_now
 

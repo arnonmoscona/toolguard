@@ -20,22 +20,22 @@ re-exporting all of that would be a list of whatever each importer happens
 to use rather than a designed interface. ``decide`` is the one thing every
 actual consumer asks for.
 
-:func:`decide` delegates to :mod:`toolguard.resolve` -- the same resolver
+:func:`decide` delegates to :mod:`toolguard.engine.resolve` -- the same resolver
 functions the live hook's own PreToolUse path calls directly -- so there is
 no separate copy of the decision logic here.
 """
 
 import dataclasses
 
-from toolguard.config import Configuration
-from toolguard.config_types import RuntimeVerdict
-from toolguard.constants import DEFAULT_COMMAND_PAYLOAD_KEY, FILE_TOOLS
-from toolguard.invocation import Invocation
-from toolguard.resolve import (
+from toolguard.configuration.config import Configuration
+from toolguard.decision_model.vocabulary import RuntimeVerdict
+from toolguard.foundation.constants import DEFAULT_COMMAND_PAYLOAD_KEY, FILE_TOOLS
+from toolguard.foundation.invocation import Invocation
+from toolguard.engine.resolve import (
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
 )
-from toolguard.tool_spec import payload_key
+from toolguard.foundation.tool_spec import payload_key
 
 
 def decide(
@@ -63,7 +63,7 @@ def decide(
             prefixes in permission patterns. Defaults to ``True``.
 
     Returns:
-        A :class:`~toolguard.config_types.RuntimeVerdict` (see that class's
+        A :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict` (see that class's
         docstring for field meanings), with ``tool``/``target`` echoing the
         arguments above.
     """
@@ -85,9 +85,9 @@ def _decide_bash(
     extended_syntax: bool,
 ) -> RuntimeVerdict:
     """
-    Resolve a Bash (or command-tool) decision via :mod:`toolguard.resolve`.
+    Resolve a Bash (or command-tool) decision via :mod:`toolguard.engine.resolve`.
 
-    :func:`~toolguard.resolve.resolve_bash_permission_detailed` always
+    :func:`~toolguard.engine.resolve.resolve_bash_permission_detailed` always
     evaluates against the ``'Bash'`` permission set and returns
     ``tool='Bash'`` on its verdict regardless of the actual invoking tool
     name. When the caller's ``tool`` differs (e.g. an MCP terminal tool
@@ -101,8 +101,8 @@ def _decide_bash(
         extended_syntax: Whether to honour extended prefixes.
 
     Returns:
-        The :class:`~toolguard.config_types.RuntimeVerdict` from
-        :func:`~toolguard.resolve.resolve_bash_permission_detailed`.
+        The :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict` from
+        :func:`~toolguard.engine.resolve.resolve_bash_permission_detailed`.
     """
     invocation = Invocation.for_evaluation(
         config,

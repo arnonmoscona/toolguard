@@ -27,9 +27,9 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from toolguard.claude_code_contract import STRIPPED_WRAPPERS
-from toolguard.config_types import CommandSpellings
-from toolguard.constants import PROGRAM_SOURCE_FILE, PROGRAM_SOURCE_NOT_FILE
+from toolguard.integration.claude_code_contract import STRIPPED_WRAPPERS
+from toolguard.decision_model.vocabulary import CommandSpellings
+from toolguard.foundation.constants import PROGRAM_SOURCE_FILE, PROGRAM_SOURCE_NOT_FILE
 from toolguard.parser import bash_parser
 from toolguard.parser.command_model import (
     IRAssignmentPrefix,
@@ -240,7 +240,7 @@ _AWK_FLAGS = _ExecutorFlags(
 #: bash-family shell's ``-e``/``-r`` are real, common flags (exit-on-error, restricted
 #: shell) that take no value and name no program -- misreading either as inline would
 #: make :func:`classify_program_source` call ``bash -e script.sh`` not-a-file. Never reached
-#: by :func:`_detect_foreign_inline_code`'s own inline-code detection, which finds an
+#: by :func:`detect_foreign_inline_code`'s own inline-code detection, which finds an
 #: executor via :data:`FOREIGN_EXECUTORS` only -- bash-family names are never in it, since
 #: that payload is decomposed by this pipeline, not floored.
 _BASH_FAMILY_FLAGS = _ExecutorFlags(inline_letters=frozenset("c"))
@@ -255,7 +255,7 @@ _DEFAULT_EXECUTOR_FLAGS = _ExecutorFlags(inline_letters=frozenset("cer"))
 #: prefix-matches, so ``python3.13`` and ``pypy3`` reach the python spec. Also serves
 #: :func:`classify_program_source`, which additionally looks up a
 #: :data:`BASH_FAMILY` name here -- entries never reached by :func:`_flags_for`'s other
-#: caller, :func:`_detect_foreign_inline_code`, since bash-family is never a "foreign
+#: caller, :func:`detect_foreign_inline_code`, since bash-family is never a "foreign
 #: executor" (see :data:`_BASH_FAMILY_FLAGS`).
 _EXECUTOR_FLAGS = {
     "python": _PYTHON_FLAGS,
@@ -361,15 +361,15 @@ def _is_foreign_executor(name: str) -> bool:
 
 
 @dataclass(frozen=True)
-class _LiftedHeredocs:
-    """What :func:`~toolguard.parser.multiline._lift_heredocs` hands to :func:`_attribute_and_substitute`."""
+class LiftedHeredocs:
+    """What :func:`~toolguard.parser.multiline._lift_heredocs` hands to :func:`attribute_and_substitute`."""
 
     lines: List[str]
     bodies: List[List[str]]
     prefix: str
 
 
-class _UnattributableHeredocError(Exception):
+class UnattributableHeredocError(Exception):
     """A lifted placeholder could not be traced to any command in the parse tree.
 
     Raised rather than guessed at -- see :func:`_record_placeholder_owners`.
@@ -539,7 +539,7 @@ def _attribute_sinks(
         One ``(is_bash_family, sink_label)`` per placeholder index, in order.
 
     Raises:
-        _UnattributableHeredocError: a placeholder's owning command was not
+        UnattributableHeredocError: a placeholder's owning command was not
             found, even line-by-line.
     """
     found: Dict[int, Tuple[List[str], List[IRPipelineElement]]] = {}
@@ -556,14 +556,14 @@ def _attribute_sinks(
     for idx in range(count):
         owner = found.get(idx)
         if owner is None:
-            raise _UnattributableHeredocError(
+            raise UnattributableHeredocError(
                 f"heredoc placeholder {idx} is not owned by any command"
             )
         sinks.append(_resolve_sink(*owner))
     return sinks
 
 
-def _attribute_and_substitute(lifted: _LiftedHeredocs) -> List[str]:
+def attribute_and_substitute(lifted: LiftedHeredocs) -> List[str]:
     """Classify each lifted heredoc's sink and settle its placeholder.
 
     The sink is read off the parse tree (:func:`_attribute_sinks`), then for
@@ -591,7 +591,7 @@ def _attribute_and_substitute(lifted: _LiftedHeredocs) -> List[str]:
         New list of logical lines with heredoc bodies removed or spliced in.
 
     Raises:
-        _UnattributableHeredocError: a placeholder cannot be traced to any
+        UnattributableHeredocError: a placeholder cannot be traced to any
             command -- the caller floors this to ASK rather than guessing.
     """
     bodies = lifted.bodies
@@ -674,7 +674,7 @@ def _executor_index(
     Args:
         tokens: The command's tokens.
         include_bash_family: Also match a :data:`BASH_FAMILY` name, for
-            :func:`classify_program_source`. :func:`_detect_foreign_inline_code`
+            :func:`classify_program_source`. :func:`detect_foreign_inline_code`
             leaves this False -- bash-family payload is decomposed by this
             pipeline, not floored as inline.
     """
@@ -796,7 +796,7 @@ def classify_program_source(cmd_text: str) -> str:
     redirected from one; :data:`PROGRAM_SOURCE_NOT_FILE` for inline code,
     stdin/REPL, or an unrecognised/absent executor -- material toolguard
     cannot resolve to a file is treated as visible, matching the ask-floor's
-    existing bias in :func:`_detect_foreign_inline_code`.
+    existing bias in :func:`detect_foreign_inline_code`.
     """
     tokens = cmd_text.split()
     idx = _executor_index(tokens, include_bash_family=True)
@@ -805,7 +805,7 @@ def classify_program_source(cmd_text: str) -> str:
     return _program_source_for_executor(tokens[idx + 1 :], _flags_for(tokens[idx]))
 
 
-def _detect_foreign_inline_code(cmd_text: str) -> bool:
+def detect_foreign_inline_code(cmd_text: str) -> bool:
     """Return True if *cmd_text* hands a foreign executor a program to run.
 
     Covers an inline-code flag in every spelling the executor accepts --
@@ -1109,7 +1109,7 @@ def _apply_leaf_policy(
 
         return extract_structured(inner_bash)
 
-    if _detect_foreign_inline_code(cmd_text) or _substitution_carries_ask_floor(
+    if detect_foreign_inline_code(cmd_text) or _substitution_carries_ask_floor(
         cmd_substs
     ):
         return [
@@ -1145,7 +1145,7 @@ def _structured_from_ir_element(
 
     A simple command's ``cmd_substs`` are not emitted as their own leaves --
     ``echo $(rm -rf /)`` still produces one leaf carrying the whole text, so
-    this stays in step with :func:`~toolguard.compound.decompose`, which
+    this stays in step with :func:`~toolguard.engine.compound.decompose`, which
     already gets the substitution's own sub-commands from
     :func:`extract_commands`. What ``cmd_substs`` change here is whether that
     one leaf carries ``ask_floor`` -- see :func:`_apply_leaf_policy`.
@@ -1347,7 +1347,7 @@ _ANY_TOKEN_RE = re.compile(r"\s+\S+")
 def _strip_wrapper(command_text: str) -> Optional[str]:
     """The inner command *command_text* runs, with one leading wrapper stripped.
 
-    Recognises :data:`toolguard.claude_code_contract.STRIPPED_WRAPPERS` by string
+    Recognises :data:`toolguard.integration.claude_code_contract.STRIPPED_WRAPPERS` by string
     inspection rather than the grammar: what follows a wrapper name is that program's OWN
     argument syntax, not bash syntax, so this is not the bash-structure parsing
     ``bash_parser.peg`` exists for. Handles an attached-value flag (``stdbuf -o0``) and a
@@ -1407,12 +1407,12 @@ def command_spellings(
     """How *command_text* may be spelled for permission matching.
 
     Combines two independent sources, with different symmetry rules -- see
-    :class:`~toolguard.config_types.CommandSpellings` for what each side means:
+    :class:`~toolguard.decision_model.vocabulary.CommandSpellings` for what each side means:
 
     - A leading ``NAME=value`` assignment (ticket 77): restricting sees past it
       unconditionally; granting sees past it only when every name in the prefix is in
       *looked_past_when_granting*.
-    - A stripped wrapper (:data:`toolguard.claude_code_contract.STRIPPED_WRAPPERS`): both
+    - A stripped wrapper (:data:`toolguard.integration.claude_code_contract.STRIPPED_WRAPPERS`): both
       sides see past it whenever one is found, since native's own worked example strips
       a wrapper for an ALLOW rule -- wrapper stripping is not assignment-gated. A wrapper
       is looked for after any assignment that was actually looked past on that side, so
@@ -1424,7 +1424,7 @@ def command_spellings(
             be matched past.
 
     Returns:
-        A :class:`~toolguard.config_types.CommandSpellings`. Both fields are empty
+        A :class:`~toolguard.decision_model.vocabulary.CommandSpellings`. Both fields are empty
         when *command_text* carries neither a leading assignment nor a stripped
         wrapper, which leaves matching exactly as it was.
     """

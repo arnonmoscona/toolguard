@@ -1,8 +1,8 @@
-"""Unit tests for toolguard.claude_code_contract: the PreToolUse wire shapes."""
+"""Unit tests for toolguard.integration.claude_code_contract: the PreToolUse wire shapes."""
 
 import unittest
 
-from toolguard.claude_code_contract import (
+from toolguard.integration.claude_code_contract import (
     ADDITIONAL_CONTEXT_KEY,
     CWD_KEY,
     HOOK_EVENT_NAME_KEY,

@@ -12,7 +12,7 @@ audit predicate: ``PYTHONPATH`` content, not process provenance".
 from dataclasses import dataclass
 from typing import List, Mapping, Optional
 
-from toolguard.install_provenance import pythonpath_shadow_entries
+from toolguard.install.install_provenance import pythonpath_shadow_entries
 from toolguard.tools.danger import Severity
 
 

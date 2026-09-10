@@ -20,7 +20,7 @@ context, and a tripwire catches whatever gets past them:
   directories derive from it -- but ``~/.config/toolguard/rules`` follows
   ``XDG_CONFIG_HOME`` whenever that is set, so that variable is pointed INSIDE
   the sandbox rather than merely unset.
-- ``toolguard.config.find_project_root`` is patched to the sandbox project.
+- ``toolguard.configuration.config.find_project_root`` is patched to the sandbox project.
 - The environment is CLEARED and rebuilt, so anything not rebuilt is absent
   rather than overridden (see :data:`SCRUBBED_ENV_VARS`).
 - The tripwire raises :class:`SandboxEscapeError` on any in-process write
@@ -47,9 +47,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
 from unittest.mock import patch
 
-from toolguard import config as toolguard_config
+from toolguard.configuration import config as toolguard_config
 from toolguard.api import decide
-from toolguard.claude_code_contract import PRE_TOOL_USE_EVENT, PreToolUseEvent
+from toolguard.integration.claude_code_contract import (
+    PRE_TOOL_USE_EVENT,
+    PreToolUseEvent,
+)
 
 __all__ = [
     "SandboxEscapeError",
@@ -423,7 +426,7 @@ class Sandbox:
 
     def load_configuration(self):
         """
-        Load the sandbox's :class:`~toolguard.config.Configuration`.
+        Load the sandbox's :class:`~toolguard.configuration.config.Configuration`.
 
         Returns:
             The resolved Configuration for the sandbox project.
@@ -450,7 +453,7 @@ class Sandbox:
             extended_syntax: Whether extended regex/glob prefixes are honoured.
 
         Returns:
-            A :class:`~toolguard.config_types.RuntimeVerdict`.
+            A :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict`.
         """
         return decide(self.load_configuration(), tool, target, extended_syntax)
 
@@ -470,7 +473,7 @@ class Sandbox:
 
         Args:
             payload: The hook event dict, overlaid onto a sandbox-default
-                :class:`~toolguard.claude_code_contract.PreToolUseEvent`, so the
+                :class:`~toolguard.integration.claude_code_contract.PreToolUseEvent`, so the
                 common case is just ``tool_name`` and ``tool_input``.
 
         Returns:
@@ -601,7 +604,8 @@ def experiment(
             stack.enter_context(patch.dict(os.environ, env, clear=True))
             stack.enter_context(
                 patch(
-                    "toolguard.config.find_project_root", return_value=sandbox.project
+                    "toolguard.configuration.config.find_project_root",
+                    return_value=sandbox.project,
                 )
             )
             stack.enter_context(_Tripwire(sandbox.root))

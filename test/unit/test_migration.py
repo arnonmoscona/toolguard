@@ -14,13 +14,13 @@ from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
 from test.unit._subprocess_harness import release_barrier_when_ready, run_child
-from toolguard import file_lock
-from toolguard import permission_migration as permission_migration_module
-from toolguard.config_write_guard import (
+from toolguard.foundation import file_lock
+from toolguard.configuration import permission_migration as permission_migration_module
+from toolguard.configuration.config_write_guard import (
     ConfigWriteVerificationError,
     verified_write_config,
 )
-from toolguard.permission_migration import (
+from toolguard.configuration.permission_migration import (
     MigrationOutcome,
     create_backup,
     detect_similar_patterns,
@@ -32,8 +32,12 @@ from toolguard.permission_migration import (
     write_json_config,
     write_toml_config,
 )
-from toolguard.rule_entry import RuleEntry, normalize_entries_preserving, real_patterns
-from toolguard.rule_sort import get_tool_priority, sort_patterns
+from toolguard.decision_model.rule_entry import (
+    RuleEntry,
+    normalize_entries_preserving,
+    real_patterns,
+)
+from toolguard.configuration.rule_sort import get_tool_priority, sort_patterns
 from toolguard.scripts import migrate_permissions as migrate_permissions_module
 
 
@@ -128,7 +132,9 @@ class TestBackupCreation(unittest.TestCase):
             source_file = Path(tmpdir) / "settings.local.json"
             backup_dir = Path(tmpdir) / "backups"
 
-            with patch("toolguard.permission_migration.datetime") as mock_datetime:
+            with patch(
+                "toolguard.configuration.permission_migration.datetime"
+            ) as mock_datetime:
                 mock_datetime.now.return_value = fixed_now
 
                 source_file.write_text('{"version": 1}')
@@ -163,7 +169,9 @@ class TestBackupCreation(unittest.TestCase):
             source_file = Path(tmpdir) / "settings.local.json"
             backup_dir = Path(tmpdir) / "backups"
 
-            with patch("toolguard.permission_migration.datetime") as mock_datetime:
+            with patch(
+                "toolguard.configuration.permission_migration.datetime"
+            ) as mock_datetime:
                 mock_datetime.now.return_value = fixed_now
 
                 source_file.write_text('{"version": 1}')
@@ -199,7 +207,9 @@ class TestBackupCreation(unittest.TestCase):
             source_file.write_text('{"test": true}')
             backup_dir = Path(tmpdir) / "backups"
 
-            with patch("toolguard.permission_migration.datetime") as mock_datetime:
+            with patch(
+                "toolguard.configuration.permission_migration.datetime"
+            ) as mock_datetime:
                 mock_datetime.now.return_value = fixed_now
                 backup_path = create_backup(source_file, backup_dir)
 
@@ -719,7 +729,7 @@ class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
         """
         Given a config_path that does not yet exist (the "new file" branch)
         When write_toml_config() is called
-        Then toolguard.config_write_guard.verified_write_config() is invoked
+        Then toolguard.configuration.config_write_guard.verified_write_config() is invoked
             with file_format="toml" and expected_patterns covering every
             pattern in the permissions being written
         """
@@ -728,7 +738,7 @@ class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
             permissions = {"allow": ["Bash(ls:*)"], "deny": ["Bash(rm:*)"], "ask": []}
 
             with patch(
-                "toolguard.permission_migration.verified_write_config"
+                "toolguard.configuration.permission_migration.verified_write_config"
             ) as mock_write:
                 write_toml_config(config_path, permissions, auto_sort=True)
 
@@ -754,7 +764,7 @@ class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
             permissions = {"allow": ["Bash(git:*)"], "deny": [], "ask": []}
 
             with patch(
-                "toolguard.permission_migration.verified_write_config"
+                "toolguard.configuration.permission_migration.verified_write_config"
             ) as mock_write:
                 write_toml_config(config_path, permissions, auto_sort=True)
 
@@ -775,7 +785,7 @@ class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
             permissions = {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
 
             with patch(
-                "toolguard.permission_migration.verified_write_config"
+                "toolguard.configuration.permission_migration.verified_write_config"
             ) as mock_write:
                 write_toml_config(config_path, permissions, auto_sort=True)
 
@@ -796,7 +806,7 @@ class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
             permissions = {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
 
             with patch(
-                "toolguard.permission_migration.verified_write_config"
+                "toolguard.configuration.permission_migration.verified_write_config"
             ) as mock_write:
                 write_json_config(config_path, permissions, auto_sort=True)
 
@@ -819,7 +829,7 @@ class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
             permissions = {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
 
             with patch(
-                "toolguard.permission_migration.verified_write_config",
+                "toolguard.configuration.permission_migration.verified_write_config",
                 side_effect=ConfigWriteVerificationError(
                     config_path, "invalid TOML", "boom"
                 ),
@@ -1033,7 +1043,7 @@ class TestSettingsFileUpdate(unittest.TestCase):
             redundant = {"allow": [], "deny": ["Bash(rm:*)"], "ask": []}
 
             with patch(
-                "toolguard.permission_migration.verified_write_config"
+                "toolguard.configuration.permission_migration.verified_write_config"
             ) as mock_write:
                 update_settings_file(settings_path, migrated, redundant)
 
@@ -1708,7 +1718,7 @@ class TestMigrationLockingAcrossProcesses(unittest.TestCase):
                 "import sys, time\n"
                 "from pathlib import Path\n"
                 "from unittest.mock import patch\n"
-                "from toolguard import permission_migration as pm\n"
+                "from toolguard.configuration import permission_migration as pm\n"
                 "project_root = Path(sys.argv[1])\n"
                 "pattern = sys.argv[2]\n"
                 "barrier = Path(sys.argv[3])\n"
@@ -1790,7 +1800,8 @@ class TestMigrationLockingAcrossProcesses(unittest.TestCase):
             holder_script = (
                 "import sys, time\n"
                 "from pathlib import Path\n"
-                "from toolguard import file_lock, permission_migration as pm\n"
+                "from toolguard.foundation import file_lock\n"
+                "from toolguard.configuration import permission_migration as pm\n"
                 "project_root = Path(sys.argv[1])\n"
                 "marker = Path(sys.argv[2])\n"
                 "lock_path = pm._migration_lock_path(project_root)\n"
@@ -1802,7 +1813,7 @@ class TestMigrationLockingAcrossProcesses(unittest.TestCase):
             contender_script = (
                 "import sys, time\n"
                 "from pathlib import Path\n"
-                "from toolguard import permission_migration as pm\n"
+                "from toolguard.configuration import permission_migration as pm\n"
                 "project_root = Path(sys.argv[1])\n"
                 "marker = Path(sys.argv[2])\n"
                 "deadline = time.monotonic() + 10\n"
@@ -2640,7 +2651,9 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         When extract_meaningful_prefix is called on each
         Then it returns an empty string (no meaningful prefix)
         """
-        from toolguard.permission_migration import extract_meaningful_prefix
+        from toolguard.configuration.permission_migration import (
+            extract_meaningful_prefix,
+        )
 
         self.assertEqual(extract_meaningful_prefix("Bash(*)"), "")
         self.assertEqual(extract_meaningful_prefix("Read(*)"), "")
@@ -2653,7 +2666,9 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         When extract_meaningful_prefix is called on each
         Then it returns that command or path prefix string
         """
-        from toolguard.permission_migration import extract_meaningful_prefix
+        from toolguard.configuration.permission_migration import (
+            extract_meaningful_prefix,
+        )
 
         self.assertEqual(
             extract_meaningful_prefix("Bash(uv run ruff format:*)"),
@@ -2956,7 +2971,10 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         # project_root IS home here; the mixin's default project is home's
         # sibling, so find_project_root must be re-pointed for this test.
         self.enterContext(
-            patch("toolguard.config.find_project_root", return_value=project_root)
+            patch(
+                "toolguard.configuration.config.find_project_root",
+                return_value=project_root,
+            )
         )
         outcome = migrate(project_root)
 

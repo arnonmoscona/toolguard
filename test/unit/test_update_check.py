@@ -1,9 +1,9 @@
 """
-Unit tests for toolguard.install_update and the toolguard.update_check CLI wrapper.
+Unit tests for toolguard.install.install_update and the toolguard.install.update_check CLI wrapper.
 
 All side effects (metadata, git, uv) are stubbed -- no real network, subprocess,
 or install runs. The git calls reach ``subprocess.run`` from inside
-:mod:`toolguard._git`, not from ``install_update``, so patching the one global
+:mod:`toolguard.install._git`, not from ``install_update``, so patching the one global
 ``subprocess`` module is what isolates them.
 """
 
@@ -17,9 +17,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from toolguard import install_update, update_check
-from toolguard.constants import DIST_NAME, GIT_TIMEOUT_SECONDS
-from toolguard.install_update import InstallInfo, InstallKind
+from toolguard.install import install_update, update_check
+from toolguard.foundation.constants import DIST_NAME, GIT_TIMEOUT_SECONDS
+from toolguard.install.install_update import InstallInfo, InstallKind
 
 
 def _completed(returncode=0, stdout="", stderr=""):
@@ -193,7 +193,7 @@ class TestDistributionName(unittest.TestCase):
         """
         Given importlib.metadata raises (toolguard not installed as a distribution)
         When distribution_name runs
-        Then it returns toolguard.constants.DIST_NAME
+        Then it returns toolguard.foundation.constants.DIST_NAME
         """
         with patch.object(
             install_update.importlib.metadata,
@@ -323,7 +323,7 @@ class TestGitSubprocessSafety(unittest.TestCase):
     """
 
     def _spy_git(self, returncode=0, stdout="deadbeef\tHEAD\n"):
-        """Patch the global subprocess.run that toolguard._git ultimately calls."""
+        """Patch the global subprocess.run that toolguard.install._git ultimately calls."""
         return patch.object(
             subprocess, "run", return_value=_completed(returncode, stdout)
         )
@@ -771,7 +771,7 @@ class TestLocalRemoteHead(unittest.TestCase):
 
 
 class TestCheck(unittest.TestCase):
-    """The core _check logic: exit codes, flags, and printed output."""
+    """The core check logic: exit codes, flags, and printed output."""
 
     REPO = Path("/home/user/toolguard")
     URL = "https://github.com/x/toolguard"
@@ -785,10 +785,10 @@ class TestCheck(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def _run_check(self, quiet=False, do_upgrade=False):
-        """Run _check capturing (exit_code, stdout, stderr)."""
+        """Run check capturing (exit_code, stdout, stderr)."""
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = install_update._check(quiet=quiet, do_upgrade=do_upgrade)
+            code = install_update.check(quiet=quiet, do_upgrade=do_upgrade)
         return code, out.getvalue(), err.getvalue()
 
     def _git_info(self, commit="installed123"):
@@ -811,7 +811,7 @@ class TestCheck(unittest.TestCase):
     def test_git_up_to_date_returns_zero(self):
         """
         Given a git install where the installed commit equals the remote HEAD
-        When _check runs
+        When check runs
         Then it queries the remote, returns exit code 0, and reports up to date
         """
         with (
@@ -830,7 +830,7 @@ class TestCheck(unittest.TestCase):
     def test_git_quiet_suppresses_up_to_date_output(self):
         """
         Given a git install up to date and --quiet
-        When _check runs
+        When check runs
         Then it still queries the remote, returns 0, and prints nothing to stdout
         """
         with (
@@ -849,7 +849,7 @@ class TestCheck(unittest.TestCase):
     def test_git_update_available_returns_one_and_prints_command(self):
         """
         Given a git install where the installed commit differs from the remote HEAD
-        When _check runs
+        When check runs
         Then it returns exit code 1 and prints the upgrade command with the dist name
         """
         with (
@@ -868,7 +868,7 @@ class TestCheck(unittest.TestCase):
     def test_git_update_available_with_quiet_still_prints(self):
         """
         Given a git install with an available update and --quiet
-        When _check runs
+        When check runs
         Then it still prints (quiet only suppresses the up-to-date case)
         """
         with (
@@ -884,7 +884,7 @@ class TestCheck(unittest.TestCase):
     def test_git_printed_command_uses_distribution_name(self):
         """
         Given a non-default distribution name (e.g. a future PyPI rename) and a git install
-        When _check reports an available update
+        When check reports an available update
         Then the printed upgrade command uses that distribution name
         """
         with (
@@ -902,7 +902,7 @@ class TestCheck(unittest.TestCase):
     def test_git_remote_unreachable_returns_unknown(self):
         """
         Given a git install where the remote HEAD cannot be fetched (offline)
-        When _check runs
+        When check runs
         Then it returns exit code 2 with an offline message
         """
         with (
@@ -918,7 +918,7 @@ class TestCheck(unittest.TestCase):
     def test_git_upgrade_flag_returns_uvs_own_exit_code(self):
         """
         Given a git install behind the remote, do_upgrade is True, and uv exits 7
-        When _check runs
+        When check runs
         Then run_upgrade is invoked and 7 is returned -- outside the 0/1/2 contract
         """
         with (
@@ -935,7 +935,7 @@ class TestCheck(unittest.TestCase):
     def test_git_upgrade_flag_does_not_run_when_up_to_date(self):
         """
         Given a git install up to date and do_upgrade is True
-        When _check runs
+        When check runs
         Then run_upgrade is NOT invoked and exit code is 0
         """
         with (
@@ -952,7 +952,7 @@ class TestCheck(unittest.TestCase):
     def test_local_up_to_date_returns_zero(self):
         """
         Given a local install where HEAD equals the remote origin HEAD
-        When _check runs
+        When check runs
         Then it queries origin, returns 0, and names the checkout path
         """
         with (
@@ -975,7 +975,7 @@ class TestCheck(unittest.TestCase):
     def test_local_quiet_suppresses_up_to_date_output(self):
         """
         Given a local install up to date and --quiet
-        When _check runs
+        When check runs
         Then it still queries origin, returns 0, and prints nothing to stdout
         """
         with (
@@ -997,7 +997,7 @@ class TestCheck(unittest.TestCase):
     def test_local_behind_returns_one_and_prints_git_pull(self):
         """
         Given a local install where HEAD is behind the remote origin HEAD
-        When _check runs
+        When check runs
         Then it returns exit code 1 and prints the git pull command for the checkout
         """
         with (
@@ -1015,7 +1015,7 @@ class TestCheck(unittest.TestCase):
     def test_local_non_editable_prints_uv_tool_install_force(self):
         """
         Given a non-editable local install that is behind
-        When _check runs
+        When check runs
         Then the output includes 'uv tool install --force <checkout>' as a reinstall step
         """
         with (
@@ -1033,7 +1033,7 @@ class TestCheck(unittest.TestCase):
     def test_local_non_editable_reinstall_alternative_is_its_own_line(self):
         """
         Given a non-editable local install that is behind
-        When _check prints the manual steps
+        When check prints the manual steps
         Then the 'or: uv tool upgrade' alternative is a separate line, not a trailing
             comment that hides it inside the install command
         """
@@ -1055,7 +1055,7 @@ class TestCheck(unittest.TestCase):
     def test_local_editable_does_not_print_uv_tool_install(self):
         """
         Given an editable local install that is behind
-        When _check runs
+        When check runs
         Then the output does NOT include 'uv tool install --force' (git pull suffices)
         """
         with (
@@ -1073,7 +1073,7 @@ class TestCheck(unittest.TestCase):
     def test_local_upgrade_flag_does_not_auto_run_prints_manual_note(self):
         """
         Given a local install that is behind and do_upgrade is True
-        When _check runs
+        When check runs
         Then run_upgrade is NOT called and a manual-steps note is printed to stderr
         """
         with (
@@ -1092,7 +1092,7 @@ class TestCheck(unittest.TestCase):
     def test_local_remote_unreachable_returns_unknown(self):
         """
         Given a local install where the remote origin HEAD cannot be fetched (offline)
-        When _check runs
+        When check runs
         Then it returns exit code 2 saying the remote could not be reached
         """
         with (
@@ -1111,7 +1111,7 @@ class TestCheck(unittest.TestCase):
         """
         Given a local install where git rev-parse HEAD fails, while origin is reachable
             and agrees with the commit detect_install recorded
-        When _check runs
+        When check runs
         Then it returns exit code 2 saying HEAD could not be read from that checkout,
             and never consults origin
         """
@@ -1135,7 +1135,7 @@ class TestCheck(unittest.TestCase):
     def test_unknown_install_returns_exit_two(self):
         """
         Given detect_install returns kind=UNKNOWN (no direct_url, no discoverable repo)
-        When _check runs
+        When check runs
         Then it returns exit code 2 naming both manual update routes
         """
         with patch.object(
@@ -1196,17 +1196,17 @@ class TestRunUpgrade(unittest.TestCase):
 
 
 class TestMain(unittest.TestCase):
-    """The argparse entry point wires flags through to _check and exits."""
+    """The argparse entry point wires flags through to check and exits."""
 
     def test_main_exits_with_check_code(self):
         """
-        Given _check returns exit code 1
+        Given check returns exit code 1
         When main runs with no flags
         Then main exits with code 1 and passes quiet=False, do_upgrade=False
         """
         with (
             patch.object(update_check.sys, "argv", ["toolguard-update-check"]),
-            patch.object(update_check, "_check", return_value=1) as mock_check,
+            patch.object(update_check, "check", return_value=1) as mock_check,
         ):
             with self.assertRaises(SystemExit) as ctx:
                 update_check.main()
@@ -1217,12 +1217,12 @@ class TestMain(unittest.TestCase):
         """
         Given --quiet and --upgrade on the command line
         When main runs
-        Then it calls _check with quiet=True and do_upgrade=True
+        Then it calls check with quiet=True and do_upgrade=True
         """
         argv = ["toolguard-update-check", "--quiet", "--upgrade"]
         with (
             patch.object(update_check.sys, "argv", argv),
-            patch.object(update_check, "_check", return_value=0) as mock_check,
+            patch.object(update_check, "check", return_value=0) as mock_check,
         ):
             with self.assertRaises(SystemExit) as ctx:
                 update_check.main()
@@ -1231,14 +1231,14 @@ class TestMain(unittest.TestCase):
 
     def test_main_propagates_an_uv_exit_code_outside_the_documented_set(self):
         """
-        Given _check returns uv's own exit code under --upgrade
+        Given check returns uv's own exit code under --upgrade
         When main runs
         Then it exits with that code rather than clamping it to 0/1/2
         """
         argv = ["toolguard-update-check", "--upgrade"]
         with (
             patch.object(update_check.sys, "argv", argv),
-            patch.object(update_check, "_check", return_value=7),
+            patch.object(update_check, "check", return_value=7),
         ):
             with self.assertRaises(SystemExit) as ctx:
                 update_check.main()

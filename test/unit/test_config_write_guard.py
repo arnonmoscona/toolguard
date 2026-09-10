@@ -1,9 +1,9 @@
 """
-Unit tests for toolguard.config_write_guard -- the self-protection gate every
+Unit tests for toolguard.configuration.config_write_guard -- the self-protection gate every
 config-file write must pass through.
 
 Isolation (`.claude/rules/test-config-isolation.md`): these tests do file I/O
-inside a throwaway TemporaryDirectory only and never reach toolguard.config's
+inside a throwaway TemporaryDirectory only and never reach toolguard.configuration.config's
 discovery path, so ConfigIsolationMixin is not needed.
 
 Atomicity is asserted by observing the rename, not by reading the file back: a
@@ -21,8 +21,8 @@ from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from unittest.mock import patch
 
-from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.config_write_guard import (
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config_write_guard import (
     ConfigWriteVerificationError,
     _ALLOW_LIST_TYPES,
     _HARD_DENY_RESTRICTING_LIST_TYPES,
@@ -911,7 +911,7 @@ class TestVerifiedWriteConfigAtomicity(unittest.TestCase):
                 renames.append((Path(src), Path(dst), Path(dst).read_bytes()))
                 return real_replace(src, dst, *args, **kwargs)
 
-            with patch("toolguard.config_write_guard.os.replace", spy):
+            with patch("toolguard.configuration.config_write_guard.os.replace", spy):
                 verified_write_config(path, new_text, "json")
 
             self.assertEqual(len(renames), 1)
@@ -946,8 +946,10 @@ class TestVerifiedWriteConfigAtomicity(unittest.TestCase):
                 return real_replace(src, dst, *args, **kwargs)
 
             with (
-                patch("toolguard.config_write_guard.os.fsync", fsync_spy),
-                patch("toolguard.config_write_guard.os.replace", replace_spy),
+                patch("toolguard.configuration.config_write_guard.os.fsync", fsync_spy),
+                patch(
+                    "toolguard.configuration.config_write_guard.os.replace", replace_spy
+                ),
             ):
                 verified_write_config(
                     path, '[permissions]\nallow = ["Bash(ls:*)"]\n', "toml"
@@ -972,7 +974,7 @@ class TestVerifiedWriteConfigAtomicity(unittest.TestCase):
             path.write_text(original)
 
             with patch(
-                "toolguard.config_write_guard.os.replace",
+                "toolguard.configuration.config_write_guard.os.replace",
                 side_effect=OSError("boom"),
             ):
                 with self.assertRaises(OSError):

@@ -22,10 +22,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from toolguard import ambient, error_reporter
+from toolguard.foundation import ambient
+from toolguard.observability import error_reporter
 from toolguard.api import decide
-from toolguard.auto_migrate import run_auto_migration
-from toolguard.claude_code_contract import (
+from toolguard.integration.claude_code_contract import (
     CWD_KEY,
     EmptyHookInputError,
     PreToolUseResponse,
@@ -33,14 +33,22 @@ from toolguard.claude_code_contract import (
     TOOL_NAME_KEY,
     read_pre_tool_use_event,
 )
-from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
-from toolguard.config import load_configuration
-from toolguard.config_divergence import check_and_warn_divergence
-from toolguard.config_types import AUTO_PERMISSION_MODE
-from toolguard.env_config import get_env_config
-from toolguard.error_log import log_conflict, log_crash, log_error, log_warning
-from toolguard.error_reporter import Reporter
-from toolguard.auto_mode_trace import (
+from toolguard.engine.compound import (
+    FALLBACK_ALLOW_PLACEHOLDER,
+    FALLBACK_DENY_PLACEHOLDER,
+)
+from toolguard.configuration.config import load_configuration
+from toolguard.configuration.config_divergence import check_and_warn_divergence
+from toolguard.decision_model.vocabulary import AUTO_PERMISSION_MODE
+from toolguard.configuration.env_config import get_env_config
+from toolguard.observability.error_log import (
+    log_conflict,
+    log_crash,
+    log_error,
+    log_warning,
+)
+from toolguard.observability.error_reporter import Reporter
+from toolguard.observability.auto_mode_trace import (
     AutoModeTraceEntry,
     FALLBACK_CAUSE_NO_MATCH,
     FALLBACK_CAUSE_PARSE_FAILURE,
@@ -48,29 +56,34 @@ from toolguard.auto_mode_trace import (
     FALLBACK_CAUSE_UNKNOWN,
     log_auto_mode_trace,
 )
-from toolguard.invocation import Invocation
-from toolguard.log_writer import LogRecord, log_command, log_discovery, resolve_log_dir
-from toolguard.resolve import (
+from toolguard.foundation.invocation import Invocation
+from toolguard.observability.log_writer import (
+    LogRecord,
+    log_command,
+    log_discovery,
+    resolve_log_dir,
+)
+from toolguard.engine.resolve import (
     RuntimeVerdict,
     UnitVerdict,
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
 )
-from toolguard.constants import (
+from toolguard.foundation.constants import (
     DECISION_ALLOW,
     DECISION_ASK,
     DECISION_DENY,
     DEFAULT_COMMAND_PAYLOAD_KEY,
     FILE_TOOLS,
 )
-from toolguard.session_warnings import issue_takeover_warning
+from toolguard.observability.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
-from toolguard.tool_spec import KNOWN_TOOL_NAMES
-from toolguard.tool_spec import payload_key as _tool_payload_key
+from toolguard.foundation.tool_spec import KNOWN_TOOL_NAMES
+from toolguard.foundation.tool_spec import payload_key as _tool_payload_key
 
 #: Tools that operate on file paths (glob-matched), as opposed to command
-#: tools (compound-parsed). Alias of ``toolguard.constants.FILE_TOOLS`` --
-#: prefer ``toolguard.constants.FILE_TOOLS`` in new code.
+#: tools (compound-parsed). Alias of ``toolguard.foundation.constants.FILE_TOOLS`` --
+#: prefer ``toolguard.foundation.constants.FILE_TOOLS`` in new code.
 FILE_PATH_TOOLS = FILE_TOOLS
 
 
@@ -78,8 +91,8 @@ def _run_startup_validation(invocation: Invocation) -> None:
     """
     Route this invocation's configuration issues to the log stream matching each one's severity.
 
-    Obtains the resolved :class:`~toolguard.config.Configuration` and renders the
-    structured issues it reports (see :meth:`~toolguard.config.Configuration.validation_issues`
+    Obtains the resolved :class:`~toolguard.configuration.config.Configuration` and renders the
+    structured issues it reports (see :meth:`~toolguard.configuration.config.Configuration.validation_issues`
     for what is detected). The hook performs no file discovery, parsing, or
     format branching here -- that lives entirely in the config module.
 
@@ -114,12 +127,12 @@ def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
     """
     Create hook output in the format expected by Claude Code.
 
-    Takes the whole :class:`~toolguard.config_types.RuntimeVerdict` -- including
+    Takes the whole :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict` -- including
     the error/guard paths in this module that build a synthetic verdict inline
     (e.g. ``RuntimeVerdict(decision="deny", reason=...)``) -- so every call site
     goes through the same construction shape. Only ``decision``, ``reason``, and
     ``additional_context`` are consumed here: which verdict fields Claude sees
-    is this module's policy call; :class:`~toolguard.claude_code_contract.PreToolUseResponse`
+    is this module's policy call; :class:`~toolguard.integration.claude_code_contract.PreToolUseResponse`
     owns only the resulting wire shape (the audit-log functions in this module
     read ``provenance``, ``matched_rule``, ``sub_matches``, ``overrides`` and
     ``fallback_warning`` as well, none of which reach Claude).
@@ -239,7 +252,7 @@ def load_file_path_patterns(
     Load allow/deny patterns for file path tools (Read, Write, Edit).
 
     Thin adapter over the config abstraction: it asks the resolved
-    :class:`~toolguard.config.Configuration` for the flattened, de-duplicated
+    :class:`~toolguard.configuration.config.Configuration` for the flattened, de-duplicated
     allow/deny patterns for ``tool_name`` (tool wrapper already stripped and
     takeover filtering already applied per layer). The hook itself opens no
     files and makes no format/location decisions.
@@ -269,7 +282,7 @@ def _format_conflict_message(target, override) -> str:
 
     Args:
         target: The command or file-path target that triggered the override.
-        override: The :class:`~toolguard.config.ConflictOverride` describing the
+        override: The :class:`~toolguard.configuration.config.ConflictOverride` describing the
             winning allow and the overridden deny.
 
     Returns:
@@ -299,7 +312,7 @@ def _log_conflict_override(target, override, log_dir) -> None:
 
     Args:
         target: The command/path that triggered the override.
-        override: The :class:`~toolguard.config.ConflictOverride`, or None (no-op).
+        override: The :class:`~toolguard.configuration.config.ConflictOverride`, or None (no-op).
         log_dir: Directory for the conflict log, or None (no-op).
     """
     if override is None or not log_dir:
@@ -319,10 +332,10 @@ def _log_fallback_allow_warning(fallback_warning: bool, reason: str, log_dir) ->
 
     ``docs/configuration.md`` promises that ``allow_with_warning`` logs a
     warning, for both ``no_match_fallback`` and ``undecidable_fallback`` --
-    this is what makes that reach :func:`toolguard.error_log.log_warning`'s
+    this is what makes that reach :func:`toolguard.observability.error_log.log_warning`'s
     dedicated stream, beyond the reason text already visible in the
     resolution log. *fallback_warning* is read as a plain boolean
-    (:attr:`~toolguard.config_types.RuntimeVerdict.fallback_warning`);
+    (:attr:`~toolguard.decision_model.vocabulary.RuntimeVerdict.fallback_warning`);
     *reason* is never inspected to decide whether to log, only used as the
     warning text once the caller says to log it.
 
@@ -352,7 +365,7 @@ def describe_takeover_conflict(conflict) -> Tuple[str, str]:
     without duplicating the wording.
 
     Args:
-        conflict: The :class:`~toolguard.config.TakeoverEnabledConflict`.
+        conflict: The :class:`~toolguard.configuration.config.TakeoverEnabledConflict`.
 
     Returns:
         ``(message, corrective_steps)``.
@@ -379,7 +392,7 @@ def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
     prompts stay active). No-op when there is no conflict or no log dir.
 
     Args:
-        conflict: The :class:`~toolguard.config.TakeoverEnabledConflict`, or None.
+        conflict: The :class:`~toolguard.configuration.config.TakeoverEnabledConflict`, or None.
         log_dir: Directory for the conflict log, or None (no-op).
     """
     if conflict is None or not log_dir:
@@ -399,15 +412,15 @@ def _reason_suffix_or_placeholder(
     not a pattern -- e.g. ``Denied by undecidable_fallback=deny (...): python
     -c``. Crediting that text to a rule would fabricate an attribution for a
     rule that does not exist in the config.
-    :attr:`~toolguard.config_types.RuntimeVerdict.fallback_outcome` is the
+    :attr:`~toolguard.decision_model.vocabulary.RuntimeVerdict.fallback_outcome` is the
     structural fact that tells the two shapes apart -- computed at the point
     the outcome was decided, never re-derived from *reason* here. The allow
-    side reads the per-unit :attr:`~toolguard.config_types.UnitVerdict.fallback_outcome`
+    side reads the per-unit :attr:`~toolguard.decision_model.vocabulary.UnitVerdict.fallback_outcome`
     instead (see :func:`_unit_matched_rule_for_log`).
 
     Args:
         fallback_outcome: The verdict's own
-            :attr:`~toolguard.config_types.RuntimeVerdict.fallback_outcome` --
+            :attr:`~toolguard.decision_model.vocabulary.RuntimeVerdict.fallback_outcome` --
             ``'denied'`` for the ``undecidable_fallback=deny`` escape hatch,
             else ``None``.
         placeholder: What to return when *fallback_outcome* names a fallback
@@ -431,7 +444,7 @@ def _provenance_brief(provenance: Optional[Any]) -> Optional[str]:
 
     Args:
         provenance: The resolution's winning
-            :class:`~toolguard.config_types.Provenance`, or ``None`` (no
+            :class:`~toolguard.decision_model.vocabulary.Provenance`, or ``None`` (no
             single rule to attribute -- e.g. a hard-deny match, pooled
             across levels, or no rule matched at all).
 
@@ -445,16 +458,16 @@ def _unit_matched_rule_for_log(unit: UnitVerdict) -> Optional[str]:
     """
     Derive the ``Matched Rule`` audit-log field for one sub-command's unit verdict.
 
-    Reads :attr:`~toolguard.config_types.UnitVerdict.fallback_outcome` directly,
+    Reads :attr:`~toolguard.decision_model.vocabulary.UnitVerdict.fallback_outcome` directly,
     at the UNIT altitude -- the counterpart to
     :func:`_reason_suffix_or_placeholder`'s RUNTIME-altitude read of
-    :attr:`~toolguard.config_types.RuntimeVerdict.fallback_outcome`.
+    :attr:`~toolguard.decision_model.vocabulary.RuntimeVerdict.fallback_outcome`.
 
     Args:
-        unit: The sub-command's resolved :class:`~toolguard.config_types.UnitVerdict`.
+        unit: The sub-command's resolved :class:`~toolguard.decision_model.vocabulary.UnitVerdict`.
 
     Returns:
-        :data:`~toolguard.compound.FALLBACK_ALLOW_PLACEHOLDER` when
+        :data:`~toolguard.engine.compound.FALLBACK_ALLOW_PLACEHOLDER` when
         ``unit.fallback_outcome`` names an allow-side escape hatch (``'warned'``
         or ``'silent'``), otherwise ``unit.matched_rule`` unchanged (which
         may itself be ``None`` -- an absent record beats a false one).
@@ -472,7 +485,7 @@ def _log_allowed_command(
     """
     Log an allowed governed-tool verdict, one entry per unit in ``verdict.sub_matches``.
 
-    Reads ``verdict.sub_matches`` (one :class:`~toolguard.config_types.UnitVerdict`
+    Reads ``verdict.sub_matches`` (one :class:`~toolguard.decision_model.vocabulary.UnitVerdict`
     per extracted sub-command, covering every case the combined reason string
     can hold -- including an ask-floor leaf's escape-hatch outcome and an
     undecidable segment) directly, rather than re-parsing the combined reason
@@ -484,7 +497,7 @@ def _log_allowed_command(
     ``UnitVerdict`` in ``sub_matches``, so the single-leaf and compound cases
     share this one loop. A file-path verdict's ``sub_matches`` is always
     empty (file paths are never compound -- see
-    :attr:`~toolguard.config_types.RuntimeVerdict.sub_matches`), so every
+    :attr:`~toolguard.decision_model.vocabulary.RuntimeVerdict.sub_matches`), so every
     file-path call takes the single-record branch below.
 
     Args:
@@ -578,7 +591,7 @@ def _build_hook_argparser() -> argparse.ArgumentParser:
         help=(
             "READ-ONLY evaluation mode: read one hook event on stdin, resolve it "
             "against the config, and print the JSON permissionDecision -- WITHOUT "
-            "logging, divergence checks, or auto-migration.  Used by the "
+            "logging or divergence checks.  Used by the "
             "cross-project security-audit skill to probe a project's safety floor "
             "without mutating it or polluting its logs."
         ),
@@ -590,8 +603,8 @@ def _command_target_key(tool_name: str) -> str:
     """
     Return the ``tool_input`` key holding a command tool's target.
 
-    Delegates to :func:`~toolguard.tool_spec.payload_key`, falling back to
-    :data:`~toolguard.constants.DEFAULT_COMMAND_PAYLOAD_KEY` for a governed
+    Delegates to :func:`~toolguard.foundation.tool_spec.payload_key`, falling back to
+    :data:`~toolguard.foundation.constants.DEFAULT_COMMAND_PAYLOAD_KEY` for a governed
     tool with no registry entry -- ``governed_tools`` accepts any name.
     """
     if tool_name in KNOWN_TOOL_NAMES:
@@ -607,10 +620,10 @@ def _governed_tool_verdict(
     or ``None`` to continue resolving it normally.
 
     An EMPTY *governed_tools* is not "nothing configured to govern" -- every
-    builtin tool populates :data:`~toolguard.tool_spec.DEFAULT_GOVERNED_TOOLS`
+    builtin tool populates :data:`~toolguard.foundation.tool_spec.DEFAULT_GOVERNED_TOOLS`
     by construction, so empty means no built-in tool is registered: a
     corrupted installation, or an edited-down
-    :data:`~toolguard.tool_spec._REGISTRY`. Denies every tool call in that
+    :data:`~toolguard.foundation.tool_spec._REGISTRY`. Denies every tool call in that
     case -- fails closed with a stated reason -- rather than reading it the
     same way as a genuinely ungoverned tool and auto-allowing everything,
     hard-denied commands included.
@@ -642,7 +655,7 @@ def _governed_tool_verdict(
 
 def _resolve_event(invocation: Invocation) -> RuntimeVerdict:
     """
-    Resolve a single hook event to a :class:`~toolguard.config_types.RuntimeVerdict`,
+    Resolve a single hook event to a :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict`,
     read-only.
 
     Adds only the parts :func:`main` owns on top of the shared decision
@@ -652,8 +665,8 @@ def _resolve_event(invocation: Invocation) -> RuntimeVerdict:
     tooling. ``decide`` reaches the same underlying resolver functions
     :func:`main`'s own handlers call directly, so delegating here rather than
     re-copying that dispatch makes the ``--eval`` decision match the live
-    hook's by construction. No logging, divergence checks, or auto-migration
-    happen here, and ``no_match_fallback`` is resolved entirely inside
+    hook's by construction. No logging or divergence checks happen here, and
+    ``no_match_fallback`` is resolved entirely inside
     ``decide`` -- there is no separate reason-rewrite step here to keep in sync.
 
     The returned verdict's ``additional_context`` carries the winning rule's
@@ -663,7 +676,7 @@ def _resolve_event(invocation: Invocation) -> RuntimeVerdict:
     function -- empty registry and ungoverned tool, both from
     :func:`_governed_tool_verdict`, and missing target below -- have no
     matched rule and leave every optional field at
-    :class:`~toolguard.config_types.RuntimeVerdict`'s defaults.
+    :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict`'s defaults.
 
     Args:
         invocation: ``tool_name``/``tool_input`` name the event; ``config``
@@ -671,7 +684,7 @@ def _resolve_event(invocation: Invocation) -> RuntimeVerdict:
             honouring.
 
     Returns:
-        The resolved :class:`~toolguard.config_types.RuntimeVerdict`, whose
+        The resolved :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict`, whose
         ``decision`` is ``'allow'``, ``'deny'``, or ``'ask'``.
     """
     governed_tools = list(invocation.config.governed_tools())
@@ -706,8 +719,8 @@ def _run_eval_mode() -> None:
     yield no result instead of the deny it was meant to prove -- the same
     fail-open class :func:`main` itself guards against.
 
-    No logging, divergence checks, or auto-migration are performed, so probing
-    a project's configuration never mutates the project or writes to its logs
+    No logging or divergence checks are performed, so probing a project's
+    configuration never mutates the project or writes to its logs
     -- :func:`create_hook_output` is used directly here rather than
     :func:`_finalize_output`, so no fault buffer is drained or implied.
     """
@@ -825,7 +838,7 @@ def _announce_takeover_state(takeover, log_dir) -> None:
     (native prompts active).
 
     Args:
-        takeover: The resolved :class:`~toolguard.config.TakeoverConfig`.
+        takeover: The resolved :class:`~toolguard.configuration.config.TakeoverConfig`.
         log_dir: Directory for the warning/conflict logs, or None (no-op).
     """
     if not log_dir:
@@ -869,11 +882,19 @@ def _run_divergence_check(
     invocation: Invocation, takeover_dict: Dict[str, Any]
 ) -> None:
     """
-    Check for config divergence, auto-migrating when configured.
+    Check for config divergence and log the warning when a new one is due.
 
     :func:`check_and_warn_divergence` detects divergence and prints an immediate
     stderr notice; this function writes the structured error-log entry when a new
     warning is due.
+
+    It does NOT migrate. Migration writes a human report to stdout, which here is
+    the channel carrying the JSON decision -- Claude Code cannot parse prose plus
+    JSON, and an exit-0 hook it cannot parse reads as "no opinion" and falls
+    through to native permission handling with nothing warning. It is also a
+    backup-and-rewrite of config files inside a synchronous per-tool-call hook,
+    fired by a once-a-day throttle rather than by anything about the tool call.
+    ``session_start`` owns it (TOO-78).
 
     Args:
         invocation: ``config`` and ``env_config`` (for ``log_dir``).
@@ -889,12 +910,6 @@ def _run_divergence_check(
     divergence = check_and_warn_divergence(project_root, takeover_dict)
     if divergence.warning_message is not None:
         log_warning(divergence.warning_message, divergence.corrective_steps, log_dir)
-    if not divergence.divergent_patterns:
-        return
-
-    config_sync = invocation.config.config_sync_settings()
-    if config_sync["auto_migrate"]:
-        run_auto_migration(project_root, dict(config_sync), takeover_dict)
 
 
 def _agent_info_for(transcript_path: str) -> str:
@@ -1003,7 +1018,7 @@ def _fallback_decided(result: RuntimeVerdict) -> bool:
     For a compound Bash verdict, ``result.matched_rule`` is ``None`` both
     when a fallback fired AND when several sub-commands each matched a real
     rule but there was no single decider to attribute (see
-    :func:`~toolguard.resolve._deciding_sub_match`) -- those are not the
+    :func:`~toolguard.engine.resolve._deciding_sub_match`) -- those are not the
     same thing, so this checks each non-audit-only ``sub_matches`` entry
     instead: any one of them with its OWN ``matched_rule`` unset means a
     fallback decided that leaf. A file-path verdict's ``sub_matches`` is
@@ -1031,16 +1046,16 @@ def _classify_fallback_cause(result: RuntimeVerdict, invocation: Invocation) -> 
     was (that is ``result.decision``, an unrelated field).
 
     Reads ``result.fallback_cause`` directly -- set structurally, at the
-    point of decision, in :mod:`toolguard.permission_resolution`/
-    :mod:`toolguard.compound`/:mod:`toolguard.resolve` -- rather than
+    point of decision, in :mod:`toolguard.engine.permission_resolution`/
+    :mod:`toolguard.engine.compound`/:mod:`toolguard.engine.resolve` -- rather than
     re-deriving it here. An earlier version of this function tried to infer
     the cause from ``fallback_outcome`` downstream and produced a wrong
-    label; see :attr:`~toolguard.config_types.UnitVerdict.fallback_outcome`'s
+    label; see :attr:`~toolguard.decision_model.vocabulary.UnitVerdict.fallback_outcome`'s
     own docstring for why that field cannot answer this question.
 
     ``parse_failure`` is the one exception, checked independently via
     ``invocation.config.parse_failures`` rather than read off *result*:
-    :func:`~toolguard.permission_resolution.apply_parse_failure_floor`'s own
+    :func:`~toolguard.engine.permission_resolution.apply_parse_failure_floor`'s own
     hard invariant makes it unconditional whenever ``parse_failures`` is
     non-empty and the decision isn't ``'deny'`` (which bypasses the floor
     entirely), so it is checked first, ahead of whatever ``fallback_cause``
@@ -1051,10 +1066,10 @@ def _classify_fallback_cause(result: RuntimeVerdict, invocation: Invocation) -> 
         invocation: Supplies ``config.parse_failures``.
 
     Returns:
-        :data:`~toolguard.auto_mode_trace.FALLBACK_CAUSE_PARSE_FAILURE`,
-        :data:`~toolguard.auto_mode_trace.FALLBACK_CAUSE_UNDECIDABLE`,
-        :data:`~toolguard.auto_mode_trace.FALLBACK_CAUSE_NO_MATCH`, or
-        :data:`~toolguard.auto_mode_trace.FALLBACK_CAUSE_UNKNOWN`.
+        :data:`~toolguard.observability.auto_mode_trace.FALLBACK_CAUSE_PARSE_FAILURE`,
+        :data:`~toolguard.observability.auto_mode_trace.FALLBACK_CAUSE_UNDECIDABLE`,
+        :data:`~toolguard.observability.auto_mode_trace.FALLBACK_CAUSE_NO_MATCH`, or
+        :data:`~toolguard.observability.auto_mode_trace.FALLBACK_CAUSE_UNKNOWN`.
     """
     # invocation.config is None only for a synthetic/test Invocation that
     # never resolves a real verdict -- the live call site in
@@ -1079,11 +1094,11 @@ def _maybe_trace_auto_mode(
     Record *result* to the auto-mode trace, if it qualifies.
 
     Fires only when Claude Code's own ``permission_mode`` is
-    :data:`~toolguard.config_types.AUTO_PERMISSION_MODE` AND a fallback (not a matched
+    :data:`~toolguard.decision_model.vocabulary.AUTO_PERMISSION_MODE` AND a fallback (not a matched
     rule) decided *result* -- see :func:`_fallback_decided`. Not ``'plan'``: Claude
     Code's own plan mode is meant to be read-only, so it is not the "less-governed" case
     this trace exists to surface. This is a read-only
-    side channel: :func:`~toolguard.auto_mode_trace.log_auto_mode_trace`
+    side channel: :func:`~toolguard.observability.auto_mode_trace.log_auto_mode_trace`
     already swallows its own write failures, and the call here is wrapped
     too, as a second safety net -- an unexpected bug in the tracing path
     must never be able to change the verdict this function is annotating.
@@ -1137,7 +1152,7 @@ def _handle_file_path_tool(invocation: Invocation) -> RuntimeVerdict:
             need to record it.
 
     Returns:
-        The resolved :class:`~toolguard.config_types.RuntimeVerdict`.
+        The resolved :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict`.
     """
     key = _tool_payload_key(invocation.tool_name)
     file_path = invocation.tool_input.get(key, "")
@@ -1206,7 +1221,7 @@ def _handle_command_tool(invocation: Invocation) -> RuntimeVerdict:
             every command tool necessarily shares Bash's ``'command'`` key.
 
     Returns:
-        The resolved :class:`~toolguard.config_types.RuntimeVerdict`.
+        The resolved :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict`.
     """
     key = _command_target_key(invocation.tool_name)
     command = invocation.tool_input.get(key, "")
@@ -1248,7 +1263,7 @@ def _resolve_reporter_log_dir(env_config: Optional[Dict[str, Any]]) -> Optional[
     """
     Resolve a :class:`Reporter`'s log directory, degrading to None on failure.
 
-    Thin wrapper over :func:`toolguard.log_writer.resolve_log_dir` so a
+    Thin wrapper over :func:`toolguard.observability.log_writer.resolve_log_dir` so a
     malformed resolution never takes down reporting itself -- see
     :func:`main`, which calls this twice: once before ``env_config`` is
     known (coarse fallback) and again once it is (refined).
@@ -1270,12 +1285,12 @@ def main() -> None:
       stdout first, including from every internal error this function catches.
       The exceptions are the stray-invocation paths -- ``--help`` (argparse
       exits 0), a TTY stdin, and, on the non-``--eval`` path,
-      :class:`~toolguard.claude_code_contract.EmptyHookInputError` -- which
+      :class:`~toolguard.integration.claude_code_contract.EmptyHookInputError` -- which
       print an explanation instead and exit 0 with no JSON decision at all,
       since none of these is a real hook call from Claude Code. Under
       ``--eval``, an empty piped stdin still exits 0 but with a JSON deny
       decision, via ``_run_eval_mode``'s own ``except ValueError``
-      (:class:`~toolguard.claude_code_contract.EmptyHookInputError` is a
+      (:class:`~toolguard.integration.claude_code_contract.EmptyHookInputError` is a
       ``ValueError`` subclass).
     - 2 if writing that JSON to stdout itself raises (see :func:`_emit_decision`)
       -- the one case with no decision left to deliver, so the host's own
@@ -1306,7 +1321,7 @@ def main() -> None:
         sys.exit(0)
 
     # Read-only evaluation mode (--eval): resolve one piped event and print the
-    # verdict without logging, divergence checks, or auto-migration. Used by
+    # verdict without logging or divergence checks. Used by
     # the cross-project security-audit skill to probe a project's safety floor
     # without mutating it.
     if args.eval_mode:

@@ -19,10 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from toolguard.config import load_config_file, wrap_tool_pattern
-from toolguard.config_write_guard import verified_write_config
-from toolguard.permission_migration import write_json_config, write_toml_config
-from toolguard.rule_entry import (
+from toolguard.configuration.config import load_config_file, wrap_tool_pattern
+from toolguard.configuration.config_write_guard import verified_write_config
+from toolguard.configuration.permission_migration import (
+    write_json_config,
+    write_toml_config,
+)
+from toolguard.decision_model.rule_entry import (
     RuleEntry,
     merge_entries,
     normalize_entries_preserving,
@@ -107,7 +110,7 @@ def _read_raw_permissions(path: Path, file_format: str) -> Dict[str, List[RuleEn
     """
     Read a config file's allow/deny/ask lists, unresolved and unfiltered.
 
-    :func:`~toolguard.rule_entry.normalize_entries_preserving` keeps an element
+    :func:`~toolguard.decision_model.rule_entry.normalize_entries_preserving` keeps an element
     it cannot parse rather than dropping it, which is what this read needs: the
     lists returned here are the ones written back.
 
@@ -183,7 +186,7 @@ def _resolve_added_entry(
     The proposal contributes a bare pattern string, but the file may already
     carry entries for that same pattern, some of them structured. Grouping,
     union and contradiction semantics all belong to
-    :func:`~toolguard.rule_entry.merge_entries`; this only turns its outcome
+    :func:`~toolguard.decision_model.rule_entry.merge_entries`; this only turns its outcome
     into an apply-or-refuse answer.
 
     Args:
@@ -201,7 +204,7 @@ def _resolve_added_entry(
         ``resolved_entries`` empty) when :func:`merge_entries` reports a
         metadata conflict -- ``skip_reason`` then names the contended key and
         contains the literal phrase "would lose rule enrichment" -- or when
-        :func:`~toolguard.rule_entry.normalize_entry` rejects ``added_wrapped``
+        :func:`~toolguard.decision_model.rule_entry.normalize_entry` rejects ``added_wrapped``
         itself (e.g. an embedded newline), in which case ``skip_reason`` is
         that rejection's message.
     """

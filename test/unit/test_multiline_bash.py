@@ -2,10 +2,14 @@
 
 import unittest
 
-from toolguard.compound import ResolveOneResult, decompose, resolve_compound_permission
+from toolguard.engine.compound import (
+    ResolveOneResult,
+    decompose,
+    resolve_compound_permission,
+)
 from toolguard.parser.command_extractor import LeafCommand, UndecidableSegment
 from toolguard.parser.multiline import extract_structured
-from toolguard.permissions import check_permission
+from toolguard.engine.permissions import check_permission
 
 
 def _extracted(command: str) -> list[tuple]:

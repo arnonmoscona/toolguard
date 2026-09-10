@@ -30,8 +30,8 @@ from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
 from toolguard.api import decide
-from toolguard.config import Configuration, Provenance
-from toolguard.constants import (
+from toolguard.configuration.config import Configuration, Provenance
+from toolguard.foundation.constants import (
     DECISION_ALLOW,
     DECISION_ASK,
     DECISION_DENY,

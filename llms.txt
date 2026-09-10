@@ -54,6 +54,10 @@ below plus a question-and-pointer list for common lookups, see
 - [Architecture, as built](docs/architecture-as-built.md): design constraints, the external
   contract module, layer model, verdict altitudes, decision path, config hierarchy, pattern
   matching, the guarded config write path, logging streams.
+- [Native pattern reference](docs/native-pattern-reference.md): what Claude Code's own
+  permission matching does, quoted from its published documentation with the date of each
+  fetch, and every point where toolguard's `[native]` diverges. The single place to
+  re-verify a native-fidelity claim -- do not restate native semantics from anywhere else.
 - [Technical notes](technical-notes.md): deep design internals (hierarchy/resolution,
   hard-deny semantics, logging streams, subagent identification).
 

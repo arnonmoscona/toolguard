@@ -940,7 +940,7 @@ class TestFindBareVerdictTuples(unittest.TestCase):
             (Optional[Tuple[str, str, List[str]]], first element str, arity
             3) but whose actual return carries no decision at all -- a
             (timestamp, project_root, levels) parse result, mirroring the
-            real toolguard.log_writer._parse_discovery_line
+            real toolguard.observability.log_writer._parse_discovery_line
         When find_bare_verdict_tuples is called
         Then it is NOT reported
         """
@@ -1085,7 +1085,7 @@ class TestFindBareVerdictTuples(unittest.TestCase):
     def test_does_not_flag_parse_discovery_line_on_real_tree(self):
         """
         Given the real toolguard/ tree, which includes
-            toolguard.log_writer._parse_discovery_line (annotated
+            toolguard.observability.log_writer._parse_discovery_line (annotated
             Optional[Tuple[str, str, List[str]]] -- verdict-shaped, but a
             (timestamp, project_root, levels) parse result, not a decision)
         When find_bare_verdict_tuples is called
@@ -1098,8 +1098,8 @@ class TestFindBareVerdictTuples(unittest.TestCase):
         """
         Given the REAL toolguard/ tree, which includes several genuine
             strict-pair (decision, reason) returns --
-            toolguard.permissions.check_permission and
-            toolguard.permission_resolution.apply_parse_failure_floor
+            toolguard.engine.permissions.check_permission and
+            toolguard.engine.permission_resolution.apply_parse_failure_floor
         When find_bare_verdict_tuples is called
         Then neither is reported
         """
@@ -2005,25 +2005,26 @@ class TestFindPrivateImports(unittest.TestCase):
 
     def test_flags_private_import_from_guarded_module(self):
         """
-        Given tools/x.py importing a private name from toolguard.config
+        Given tools/x.py importing a private name from toolguard.configuration.config
         When find_private_imports is called
         Then the site is reported
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(
-                root / "tools" / "x.py", "from toolguard.config import _private_thing\n"
+                root / "tools" / "x.py",
+                "from toolguard.configuration.config import _private_thing\n",
             )
             sites = af.find_private_imports(root)
             self.assertEqual(len(sites), 1)
             self.assertEqual(sites[0]["private_name"], "_private_thing")
-            self.assertEqual(sites[0]["target_module"], "config")
-            self.assertEqual(sites[0]["defining_module"], "config")
+            self.assertEqual(sites[0]["target_module"], "configuration.config")
+            self.assertEqual(sites[0]["defining_module"], "configuration.config")
             self.assertEqual(sites[0]["route"], "from_import")
 
     def test_allows_public_import_from_guarded_module(self):
         """
-        Given tools/x.py importing a public name from toolguard.config
+        Given tools/x.py importing a public name from toolguard.configuration.config
         When find_private_imports is called
         Then no site is reported
         """
@@ -2037,7 +2038,7 @@ class TestFindPrivateImports(unittest.TestCase):
 
     def test_allows_dunder_import(self):
         """
-        Given tools/x.py importing a dunder name from toolguard.config
+        Given tools/x.py importing a dunder name from toolguard.configuration.config
         When find_private_imports is called
         Then it is not treated as private (dunder is excluded)
         """
@@ -2050,14 +2051,17 @@ class TestFindPrivateImports(unittest.TestCase):
 
     def test_flags_private_import_from_runtime_module(self):
         """
-        Given hook.py (runtime layer) importing a private name from toolguard.config
+        Given hook.py (runtime layer) importing a private name from toolguard.configuration.config
         When find_private_imports is called
         Then the site is reported -- runtime modules are checked the same as
             tooling modules
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write(root / "hook.py", "from toolguard.config import _private_thing\n")
+            _write(
+                root / "hook.py",
+                "from toolguard.configuration.config import _private_thing\n",
+            )
             sites = af.find_private_imports(root)
             self.assertEqual(len(sites), 1)
             self.assertEqual(sites[0]["importer"], "hook")
@@ -2086,7 +2090,7 @@ class TestFindPrivateImports(unittest.TestCase):
             root = Path(tmp)
             _write(
                 root / "tools" / "gen.py",
-                "# generated from x.peg\nfrom toolguard.config import _private_thing\n",
+                "# generated from x.peg\nfrom toolguard.configuration.config import _private_thing\n",
             )
             self.assertEqual(af.find_private_imports(root), [])
 
@@ -2109,7 +2113,7 @@ class TestFindPrivateImports(unittest.TestCase):
 
     def test_flags_private_attribute_access_via_aliased_import(self):
         """
-        Given tools/x.py doing `import toolguard.config as cfg` then reading
+        Given tools/x.py doing `import toolguard.configuration.config as cfg` then reading
             `cfg._private_thing` (module-attribute access, not a from-import)
         When find_private_imports is called
         Then the site is reported via the attribute_access route
@@ -2118,33 +2122,37 @@ class TestFindPrivateImports(unittest.TestCase):
             root = Path(tmp)
             _write(
                 root / "tools" / "x.py",
-                "import toolguard.config as cfg\ncfg._private_thing()\n",
+                "import toolguard.configuration.config as cfg\ncfg._private_thing()\n",
             )
             sites = af.find_private_imports(root)
             self.assertEqual(len(sites), 1)
             self.assertEqual(sites[0]["route"], "attribute_access")
             self.assertEqual(sites[0]["private_name"], "_private_thing")
-            self.assertEqual(sites[0]["target_module"], "config")
+            self.assertEqual(sites[0]["target_module"], "configuration.config")
 
     def test_flags_private_attribute_access_via_dotted_bare_import(self):
         """
-        Given tools/x.py doing `import toolguard.config` (no `as`) then
-            reading `toolguard.config._private_thing`
+        Given tools/x.py doing `import toolguard.configuration.config` (no `as`) then
+            reading `toolguard.configuration.config._private_thing`
         When find_private_imports is called
         Then the site is reported -- the multi-hop chain resolves because
             config.py genuinely exists on disk in this fixture
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write(root / "config.py", "_private_thing = 1\n")
+            # The package __init__ matters: the multi-hop chain is followed
+            # only while each accumulated path is a real module on disk.
+            _write(root / "configuration" / "__init__.py", "")
+            _write(root / "configuration" / "config.py", "_private_thing = 1\n")
             _write(
                 root / "tools" / "x.py",
-                "import toolguard.config\nprint(toolguard.config._private_thing)\n",
+                "import toolguard.configuration.config\n"
+                "print(toolguard.configuration.config._private_thing)\n",
             )
             sites = af.find_private_imports(root)
             self.assertEqual(len(sites), 1)
             self.assertEqual(sites[0]["route"], "attribute_access")
-            self.assertEqual(sites[0]["target_module"], "config")
+            self.assertEqual(sites[0]["target_module"], "configuration.config")
 
     def test_flags_private_attribute_access_via_from_toolguard_import(self):
         """
@@ -2156,15 +2164,16 @@ class TestFindPrivateImports(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write(root / "config.py", "_private_thing = 1\n")
+            _write(root / "configuration" / "config.py", "_private_thing = 1\n")
             _write(
                 root / "tools" / "x.py",
-                "from toolguard import config\nprint(config._private_thing)\n",
+                "from toolguard.configuration import config\n"
+                "print(config._private_thing)\n",
             )
             sites = af.find_private_imports(root)
             self.assertEqual(len(sites), 1)
             self.assertEqual(sites[0]["route"], "attribute_access")
-            self.assertEqual(sites[0]["target_module"], "config")
+            self.assertEqual(sites[0]["target_module"], "configuration.config")
 
     def test_flags_getattr_with_literal_private_name(self):
         """
@@ -2177,7 +2186,8 @@ class TestFindPrivateImports(unittest.TestCase):
             root = Path(tmp)
             _write(
                 root / "tools" / "x.py",
-                "import toolguard.config as config\ngetattr(config, '_private_thing')\n",
+                "import toolguard.configuration.config as config\n"
+                "getattr(config, '_private_thing')\n",
             )
             sites = af.find_private_imports(root)
             self.assertEqual(len(sites), 1)
@@ -2187,7 +2197,7 @@ class TestFindPrivateImports(unittest.TestCase):
     def test_flags_private_import_from_permission_resolution(self):
         """
         Given tools/x.py importing a private name from
-            toolguard.permission_resolution
+            toolguard.engine.permission_resolution
         When find_private_imports is called
         Then the site is reported
         """
@@ -2195,11 +2205,11 @@ class TestFindPrivateImports(unittest.TestCase):
             root = Path(tmp)
             _write(
                 root / "tools" / "x.py",
-                "from toolguard.permission_resolution import _decide_internal\n",
+                "from toolguard.engine.permission_resolution import _decide_internal\n",
             )
             sites = af.find_private_imports(root)
             self.assertEqual(len(sites), 1)
-            self.assertEqual(sites[0]["target_module"], "permission_resolution")
+            self.assertEqual(sites[0]["target_module"], "engine.permission_resolution")
 
     def test_follows_reexport_through_unguarded_module_to_guarded_origin(self):
         """
@@ -2214,20 +2224,22 @@ class TestFindPrivateImports(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(
-                root / "rule_entry.py", "def _strip_tool_wrapper(x):\n    return x\n"
+                root / "decision_model" / "rule_entry.py",
+                "def _strip_tool_wrapper(x):\n    return x\n",
             )
             _write(
-                root / "constants.py",
-                "from toolguard.rule_entry import _strip_tool_wrapper as _strip_tool_wrapper\n",
+                root / "foundation" / "constants.py",
+                "from toolguard.decision_model.rule_entry import "
+                "_strip_tool_wrapper as _strip_tool_wrapper\n",
             )
             _write(
                 root / "tools" / "x.py",
-                "from toolguard.constants import _strip_tool_wrapper\n",
+                "from toolguard.foundation.constants import _strip_tool_wrapper\n",
             )
             sites = af.find_private_imports(root)
             self.assertEqual(len(sites), 1)
-            self.assertEqual(sites[0]["target_module"], "constants")
-            self.assertEqual(sites[0]["defining_module"], "rule_entry")
+            self.assertEqual(sites[0]["target_module"], "foundation.constants")
+            self.assertEqual(sites[0]["defining_module"], "decision_model.rule_entry")
 
     def test_repointing_import_at_reexport_origin_does_not_clear_violation(self):
         """
@@ -2242,23 +2254,27 @@ class TestFindPrivateImports(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(
-                root / "rule_entry.py", "def _strip_tool_wrapper(x):\n    return x\n"
+                root / "decision_model" / "rule_entry.py",
+                "def _strip_tool_wrapper(x):\n    return x\n",
             )
             _write(
-                root / "config.py",
-                "from toolguard.rule_entry import _strip_tool_wrapper as _strip_tool_wrapper\n",
+                root / "configuration" / "config.py",
+                "from toolguard.decision_model.rule_entry import "
+                "_strip_tool_wrapper as _strip_tool_wrapper\n",
             )
             _write(
                 root / "tools" / "takeover_audit.py",
-                "from toolguard.config import _strip_tool_wrapper\n",
+                "from toolguard.configuration.config import _strip_tool_wrapper\n",
             )
             via_reexport = af.find_private_imports(root)
             self.assertEqual(len(via_reexport), 1)
-            self.assertEqual(via_reexport[0]["defining_module"], "rule_entry")
+            self.assertEqual(
+                via_reexport[0]["defining_module"], "decision_model.rule_entry"
+            )
 
             _write(
                 root / "tools" / "takeover_audit.py",
-                "from toolguard.rule_entry import _strip_tool_wrapper\n",
+                "from toolguard.decision_model.rule_entry import _strip_tool_wrapper\n",
             )
             via_direct = af.find_private_imports(root)
             self.assertEqual(
@@ -2268,8 +2284,12 @@ class TestFindPrivateImports(unittest.TestCase):
                 "violation -- doing so is the exact gaming move this "
                 "regression test exists to block",
             )
-            self.assertEqual(via_direct[0]["target_module"], "rule_entry")
-            self.assertEqual(via_direct[0]["defining_module"], "rule_entry")
+            self.assertEqual(
+                via_direct[0]["target_module"], "decision_model.rule_entry"
+            )
+            self.assertEqual(
+                via_direct[0]["defining_module"], "decision_model.rule_entry"
+            )
 
     def test_reports_dynamic_getattr_as_unresolvable_not_a_violation(self):
         """
@@ -2317,13 +2337,16 @@ class TestR6GuardedAndCheckedModules(unittest.TestCase):
         """
         Given the real .pyscn.toml architecture config
         When _r6_guarded_modules is called
-        Then permission_resolution, resolve, and rule_entry are included
+        Then the engine and configuration layer packages are included
+
+        Since TOO-78 the guarded set holds LAYER PACKAGES, not module names:
+        ``scan_private_reaches`` matches ``first_segment(defining_module)``
+        against it, and a module's first segment is now its package.
         """
         arch = af.parse_architecture_config()
         guarded = af._r6_guarded_modules(arch)
-        self.assertIn("permission_resolution", guarded)
-        self.assertIn("resolve", guarded)
-        self.assertIn("rule_entry", guarded)
+        self.assertIn("engine", guarded)
+        self.assertIn("configuration", guarded)
 
     def test_guarded_modules_excludes_parser(self):
         """
@@ -3327,7 +3350,7 @@ class TestComputePredicates(unittest.TestCase):
             "known_limitations",
         ):
             self.assertIn(key, r6)
-        self.assertIn("permission_resolution", r6["guarded_modules"])
+        self.assertIn("engine", r6["guarded_modules"])
         self.assertNotIn("parser", r6["guarded_modules"])
         self.assertIn("hook", r6["checked_modules"])
         self.assertTrue(
@@ -3996,68 +4019,61 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         """
         Given the real .pyscn.toml's declared architecture rules
         When the "api" layer's allow-list is read
-        Then it permits "api", "engine", "config", "observability" and
-             "foundation" only -- not "runtime", "tooling", or "support"
+        Then it permits "api", "engine", "configuration", "decision_model",
+             "observability", "foundation" and "integration" only -- not
+             "install", "runtime", "tooling", or "support"
         """
         arch = af.parse_architecture_config()
         allowed = set(arch.allow_for("api"))
         self.assertEqual(
-            allowed, {"api", "engine", "config", "observability", "foundation"}
+            allowed,
+            {
+                "api",
+                "engine",
+                "configuration",
+                "decision_model",
+                "observability",
+                "foundation",
+                "integration",
+            },
         )
         self.assertNotIn("runtime", allowed)
         self.assertNotIn("tooling", allowed)
         self.assertNotIn("support", allowed)
 
-    def test_every_layer_allow_list_is_pinned_against_a_silent_loosening(self):
+    def test_the_declared_dag_is_pinned_against_a_silent_loosening(self):
         """
         Given the real .pyscn.toml, which is simultaneously the specification
             --layers checks against AND the only thing it is checked against
-        When every declared layer's allow-list is compared with the expected
-            map held here
-        Then they match exactly. Measured: an import that violates the map can
-            be erased either by fixing the import or by adding the target layer
-            to the source layer's allow-list, and check_layers' report is
-            identical in both cases. Only the "api" layer was pinned before, so
-            loosening any of the other seven was invisible. This pin makes such
-            an edit a deliberate, two-file change.
+        When the declared DAG is compared with the expected edges held here
+        Then they match exactly
+
+        Measured: an import that violates the map can be erased either by
+        fixing the import or by widening the map, and check_layers' report is
+        identical in both cases. This pin makes a widening a deliberate
+        two-file change.
+
+        It pins the DAG rather than the expanded [[architecture.rules]] because
+        the DAG is the source of truth and --layers already asserts the two
+        agree -- so this is the smaller literal AND the one that matters. Edges
+        are transitive, which is exactly why a pin is worth having: adding one
+        edge grants everything below its target at once.
         """
         arch = af.parse_architecture_config()
-        actual = {rule.from_layer: rule.allow for rule in arch.rules}
         self.assertEqual(
-            actual,
+            {layer: sorted(targets) for layer, targets in arch.dag.items()},
             {
-                "foundation": ("foundation",),
-                "observability": ("observability", "foundation"),
-                "config": ("config", "observability", "foundation"),
-                "engine": ("engine", "config", "observability", "foundation"),
-                "api": ("api", "engine", "config", "observability", "foundation"),
-                "runtime": (
-                    "runtime",
-                    "api",
-                    "engine",
-                    "config",
-                    "observability",
-                    "foundation",
-                ),
-                "tooling": (
-                    "tooling",
-                    "runtime",
-                    "api",
-                    "engine",
-                    "config",
-                    "observability",
-                    "foundation",
-                ),
-                "support": (
-                    "support",
-                    "tooling",
-                    "runtime",
-                    "api",
-                    "engine",
-                    "config",
-                    "observability",
-                    "foundation",
-                ),
+                "integration": [],
+                "foundation": ["integration"],
+                "decision_model": ["foundation"],
+                "install": ["foundation"],
+                "observability": ["foundation"],
+                "configuration": ["decision_model", "observability"],
+                "engine": ["decision_model"],
+                "api": ["configuration", "engine"],
+                "runtime": ["api", "install"],
+                "tooling": ["runtime"],
+                "support": ["tooling"],
             },
         )
 
@@ -4181,7 +4197,7 @@ def _ambient_fixture(tmp: Path, package: dict) -> Path:
 
 
 class TestAmbientRouteCheck(unittest.TestCase):
-    """``--ambient``: reads of home, cwd and the environment that bypass toolguard.ambient."""
+    """``--ambient``: reads of home, cwd and the environment that bypass toolguard.foundation.ambient."""
 
     def test_an_os_import_outside_an_owner_module_is_a_fatal_finding(self):
         """
@@ -4729,6 +4745,213 @@ class TestUndeclaredTypesOnTheRealTree(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             code = af.main(["--undeclared-types", "--json"])
+        self.assertEqual(code, 0, stdout.getvalue())
+
+
+class TestLayerDag(unittest.TestCase):
+    """
+    The declared layer DAG (TOO-78). Edges are TRANSITIVE: ``A -> B -> C``
+    means A may import C, so only the minimal edges are declared and the
+    closure is computed.
+
+    Acyclicity is the hard gate. A dependency loop costs you the ability to
+    reason about the code and buys a family of import-order bugs; everything
+    else here is bookkeeping by comparison.
+    """
+
+    def test_closure_follows_edges_transitively(self):
+        """
+        Given a declared chain a -> b -> c
+        When the closure is computed
+        Then a reaches both b and c, and c reaches nothing
+        """
+        closure = af.dag_closure({"a": ("b",), "b": ("c",), "c": ()})
+        self.assertEqual(closure["a"], frozenset({"b", "c"}))
+        self.assertEqual(closure["b"], frozenset({"c"}))
+        self.assertEqual(closure["c"], frozenset())
+
+    def test_closure_does_not_invent_an_unreachable_edge(self):
+        """
+        Given two disjoint chains
+        When the closure is computed
+        Then neither chain reaches the other -- the whole value of the DAG is
+             what it does NOT permit
+        """
+        closure = af.dag_closure({"a": ("b",), "b": (), "x": ("y",), "y": ()})
+        self.assertNotIn("x", closure["a"])
+        self.assertNotIn("a", closure["x"])
+
+    def test_a_cycle_is_reported(self):
+        """
+        Given a declared cycle a -> b -> a
+        When the DAG is checked
+        Then the cycle is reported rather than silently closed over
+        """
+        cycles = af.dag_cycles({"a": ("b",), "b": ("a",)})
+        self.assertTrue(cycles)
+
+    def test_an_acyclic_graph_reports_no_cycle(self):
+        """
+        Given an acyclic declaration
+        When the DAG is checked
+        Then nothing is reported
+        """
+        self.assertEqual(af.dag_cycles({"a": ("b",), "b": ("c",), "c": ()}), [])
+
+    def test_the_real_dag_is_acyclic(self):
+        """
+        Given the DAG declared in the real .pyscn.toml
+        When it is checked for cycles
+        Then there are none
+        """
+        arch = af.parse_architecture_config()
+        self.assertTrue(arch.dag, "no [architecture.dag] table declared")
+        self.assertEqual(af.dag_cycles(arch.dag), [])
+
+    def test_the_rules_blocks_equal_the_dag_closure(self):
+        """
+        Given the DAG as the source of truth and [[architecture.rules]] as the
+            expanded form pyscn consumes
+        When each layer's allow-list is compared with its closure plus itself
+        Then they agree exactly
+
+        Two representations of one decision drift unless something compares
+        them. This is what keeps the expanded lists honest.
+        """
+        arch = af.parse_architecture_config()
+        closure = af.dag_closure(arch.dag)
+        for layer in sorted(arch.dag):
+            with self.subTest(layer=layer):
+                self.assertEqual(
+                    set(arch.allow_for(layer)),
+                    closure[layer] | {layer},
+                    f"{layer}'s [[architecture.rules]] allow-list disagrees with "
+                    f"the [architecture.dag] closure",
+                )
+
+    def test_every_declared_layer_appears_in_the_dag(self):
+        """
+        Given the declared layers
+        When each is looked up in the DAG
+        Then all of them are present -- a layer missing from the DAG has its
+             dependencies unvalidated, which is the silent-degradation shape
+             this map has produced before
+        """
+        arch = af.parse_architecture_config()
+        missing = sorted({layer.name for layer in arch.layers} - set(arch.dag))
+        self.assertEqual(missing, [])
+
+    def test_the_layers_report_carries_the_closure(self):
+        """
+        Given the real configuration
+        When --layers runs
+        Then the computed closure is in the output
+
+        A transitive edge grants everything below it, so adding one can widen
+        the permitted set far beyond what the diff shows. Printing the closure
+        is what makes that visible at the moment it changes.
+        """
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            af.main(["--layers"])
+        self.assertIn("closure", stdout.getvalue().lower())
+
+
+class TestCrossModulePrivateImports(unittest.TestCase):
+    """
+    A leading underscore declares a name to be its module's own business, so
+    importing one from another module is either a missing public name or a
+    dependency that should not exist (TOO-78).
+
+    Unlike ``scan_private_reaches``, which asks the narrower R6 question about
+    tooling/runtime reaching into configuration/engine, this holds for every
+    module pair in the package.
+    """
+
+    def test_flags_a_private_imported_from_another_module(self):
+        """
+        Given a module importing a leading-underscore name from another module
+        When find_cross_module_private_imports runs
+        Then the site is reported with its importer, target and name
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "a.py", "from toolguard.b import _helper\n")
+            _write(root / "b.py", "def _helper():\n    return 1\n")
+            findings = af.find_cross_module_private_imports(root)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["importer"], "a")
+            self.assertEqual(findings[0]["target_module"], "b")
+            self.assertEqual(findings[0]["private_name"], "_helper")
+
+    def test_allows_a_public_import(self):
+        """
+        Given a module importing a public name from another module
+        When find_cross_module_private_imports runs
+        Then nothing is reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "a.py", "from toolguard.b import helper\n")
+            _write(root / "b.py", "def helper():\n    return 1\n")
+            self.assertEqual(af.find_cross_module_private_imports(root), [])
+
+    def test_allows_a_dunder_import(self):
+        """
+        Given a module importing a dunder from another module
+        When find_cross_module_private_imports runs
+        Then nothing is reported -- a dunder is not a private name
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "a.py", "from toolguard.b import __version__\n")
+            _write(root / "b.py", '__version__ = "1"\n')
+            self.assertEqual(af.find_cross_module_private_imports(root), [])
+
+    def test_flags_the_aliased_reexport_form(self):
+        """
+        Given ``from toolguard.b import _x as _x``, the deliberate re-export
+            spelling
+        When find_cross_module_private_imports runs
+        Then it is still reported -- re-exporting another module's private
+             spreads the reach rather than resolving it
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "a.py", "from toolguard.b import _x as _x\n")
+            _write(root / "b.py", "_x = 1\n")
+            findings = af.find_cross_module_private_imports(root)
+            self.assertEqual(len(findings), 1)
+
+    def test_the_real_tree_has_none(self):
+        """
+        Given the real toolguard/ tree
+        When find_cross_module_private_imports runs
+        Then it reports nothing -- every cross-module name is public
+
+        This is the check itself, not a sample of it: the scan is total over
+        the package, so a new private reach fails here the day it lands.
+        """
+        findings = af.find_cross_module_private_imports()
+        self.assertEqual(
+            findings,
+            [],
+            "cross-module private imports: "
+            + "; ".join(
+                f"{f['importer']} -> {f['target_module']}.{f['private_name']}"
+                for f in findings
+            ),
+        )
+
+    def test_the_privates_mode_exits_zero_on_this_tree(self):
+        """
+        Given the real tree
+        When main runs with --privates
+        Then it exits 0
+        """
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = af.main(["--privates"])
         self.assertEqual(code, 0, stdout.getvalue())
 
 

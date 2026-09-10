@@ -22,11 +22,11 @@ What each finding reads:
     takeover ON, and a native blanket allow absent from the raw
     ``ignored_allow_patterns``/``additional_ignored_patterns`` lists.
 ``loose-no-match-fallback`` (LOW)
-    :meth:`~toolguard.config.Configuration.resolved_no_match_fallback`, the
+    :meth:`~toolguard.configuration.config.Configuration.resolved_no_match_fallback`, the
     setting that actually governs, whenever it is anything other than
     ``'deny'``.
 ``loose-undecidable-fallback`` (HIGH)
-    :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`, when
+    :meth:`~toolguard.configuration.config.Configuration.resolved_undecidable_fallback`, when
     it is ``'allow_with_warning'`` or ``'allow'``. ``'deny'`` is deliberately
     not flagged: it is stricter than the ``'ask'`` default, and a finding on a
     safe configuration would train users to ignore findings.
@@ -43,8 +43,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import List, Optional, Set, Tuple
 
-from toolguard.claude_code_contract import PRE_TOOL_USE_EVENT
-from toolguard.config import (
+from toolguard.integration.claude_code_contract import PRE_TOOL_USE_EVENT
+from toolguard.configuration.config import (
     NO_MATCH_FALLBACK_IN_AUTO_MODE_KEY,
     NO_MATCH_FALLBACK_KEY,
     UNDECIDABLE_FALLBACK_IN_AUTO_MODE_KEY,
@@ -53,13 +53,13 @@ from toolguard.config import (
     Provenance,
     TakeoverConfig,
 )
-from toolguard.constants import (
+from toolguard.foundation.constants import (
     DECISION_ALLOW,
     DECISION_ASK,
     DECISION_DENY,
     FALLBACK_ALLOW_WITH_WARNING,
 )
-from toolguard.rule_entry import strip_tool_wrapper
+from toolguard.decision_model.rule_entry import strip_tool_wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ def _get_blanket_allows_in_native(
     Membership is tested on the raw, wrapper-intact form, so ``Bash(*)`` in the
     ignored lists does not make ``mcp__custom__tool(*)`` covered. Takeover's own
     filtering compares the wrapper-stripped form instead, via
-    :meth:`~toolguard.config_types.TakeoverConfig.normalized_ignored_patterns`.
+    :meth:`~toolguard.decision_model.vocabulary.TakeoverConfig.normalized_ignored_patterns`.
 
     Args:
         config: The resolved configuration.
@@ -451,7 +451,7 @@ def audit_takeover(
                 "will execute with a warning instead of being asked about or denied."
             )
             no_rule_note = (
-                ". toolguard.compound's governing principle is 'when in doubt, "
+                ". toolguard.engine.compound's governing principle is 'when in doubt, "
                 "ASK: any segment that cannot be safely decomposed resolves to "
                 "ASK rather than a silent allow of an undecomposed blob' -- "
                 "this setting switches that principle off, turning every "
@@ -465,7 +465,7 @@ def audit_takeover(
             no_rule_note = (
                 ", and -- unlike 'allow_with_warning' -- without even a "
                 "warning log entry marking that it happened. "
-                "toolguard.compound's governing principle is 'when in doubt, "
+                "toolguard.engine.compound's governing principle is 'when in doubt, "
                 "ASK: any segment that cannot be safely decomposed resolves to "
                 "ASK rather than a silent allow of an undecomposed blob' -- "
                 "this setting switches that principle off AND removes the "
@@ -590,6 +590,6 @@ def effective_takeover_state(
         config: The resolved configuration.
 
     Returns:
-        The resolved :class:`~toolguard.config.TakeoverConfig`.
+        The resolved :class:`~toolguard.configuration.config.TakeoverConfig`.
     """
     return config.takeover_mode()

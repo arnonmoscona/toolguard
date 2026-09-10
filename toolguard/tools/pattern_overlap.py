@@ -8,7 +8,7 @@ returns ``None`` for them.
 
 from typing import List, Optional, Tuple
 
-from toolguard.patterns import PatternType, parse_pattern
+from toolguard.foundation.patterns import PatternType, parse_pattern
 
 
 def split_default_body(body: str) -> Tuple[List[str], str]:
@@ -16,7 +16,7 @@ def split_default_body(body: str) -> Tuple[List[str], str]:
     Split a DEFAULT pattern body into ``(cmd_tokens, args_part)``.
 
     The ``:*``/``:**`` shorthand is recognised only when it is the pattern's literal
-    end, matching :func:`toolguard.permissions.match_command` and Claude Code's own
+    end, matching :func:`toolguard.engine.permissions.match_command` and Claude Code's own
     ``:*`` rule: a ``:`` anywhere else -- e.g. inside a URL like
     ``'curl http://ex.com/*'`` -- is a literal character, not a separator. Only that
     trailing ``**``/``*`` is normalized.

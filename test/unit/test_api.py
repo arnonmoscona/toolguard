@@ -11,15 +11,15 @@ from unittest.mock import patch
 
 from test.unit._real_log_dir_guard import get_leak_events
 from toolguard.api import _decide_bash, decide
-from toolguard.config import (
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,
 )
-from toolguard.config_types import RuntimeVerdict
-from toolguard.file_matching import check_file_path_hard_deny
-from toolguard.invocation import Invocation
-from toolguard.resolve import (
+from toolguard.decision_model.vocabulary import RuntimeVerdict
+from toolguard.engine.file_matching import check_file_path_hard_deny
+from toolguard.foundation.invocation import Invocation
+from toolguard.engine.resolve import (
     UnitVerdict,
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,

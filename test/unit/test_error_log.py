@@ -1,5 +1,5 @@
 """
-Unit tests for toolguard.error_log.
+Unit tests for toolguard.observability.error_log.
 
 Mostly log_crash, which unlike its siblings needs no resolved project log_dir:
 it writes full exception detail to the fixed ~/.toolguard/errors/ location, so
@@ -20,8 +20,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import ambient
-from toolguard.error_log import log_crash, log_warning
+from toolguard.foundation import ambient
+from toolguard.observability.error_log import log_crash, log_warning
 
 
 def _homeless():
@@ -138,7 +138,7 @@ class TestLogCrash(unittest.TestCase):
             home = Path(tmpdir)
             with (
                 patch("pathlib.Path.home", return_value=home),
-                patch("toolguard.error_log.datetime") as mock_datetime,
+                patch("toolguard.observability.error_log.datetime") as mock_datetime,
             ):
                 mock_datetime.now.return_value = fixed_now
 
@@ -210,7 +210,7 @@ class TestLogCrash(unittest.TestCase):
         with (
             # Patching the accessor, not isolating config: only an ambient.home
             # that raises produces the machine this test is about.
-            patch("toolguard.ambient.home", _homeless),
+            patch("toolguard.foundation.ambient.home", _homeless),
             patch("sys.stderr", stderr),
         ):
             # Without this the fixture cannot produce the negative case.

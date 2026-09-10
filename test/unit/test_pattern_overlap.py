@@ -2,7 +2,7 @@
 
 import unittest
 
-from toolguard.permissions import match_command
+from toolguard.engine.permissions import match_command
 from toolguard.tools.pattern_overlap import (
     default_prefix_tokens,
     prefixes_overlap,

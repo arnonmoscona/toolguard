@@ -5,7 +5,7 @@ through :func:`toolguard.api.decide`.
 The model under test: within a layer a deny wins over any allow or ask, however
 specific; otherwise the more specific of a matching allow and ask wins, with an
 exact tie going to ask; and a blanket ``*``-class ask is excluded from matching
-(:func:`toolguard.permissions.is_universal_pattern`), so a layer holding only
+(:func:`toolguard.engine.permissions.is_universal_pattern`), so a layer holding only
 that declines to decide and the cascade runs on to ``no_match_fallback``. Also
 covered here: the parse-failure ASK floor, and the inline/heredoc ASK floor's
 reach across command tools.
@@ -22,7 +22,7 @@ from typing import List, Optional, Tuple
 from unittest.mock import patch
 
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 
 #: An MCP command tool: routed through the ``Bash`` pattern namespace by
 #: :func:`toolguard.api.decide`.
@@ -253,7 +253,7 @@ class TestAskAllowTieBreak(unittest.TestCase):
 class TestFilePathAskResolution(unittest.TestCase):
     """
     The same ask-resolution model for file-path tools (Read/Write/Edit), whose
-    resolver is :func:`toolguard.file_matching.decide_file_path_at_level_detailed`.
+    resolver is :func:`toolguard.engine.file_matching.decide_file_path_at_level_detailed`.
     """
 
     def test_specific_file_ask_prompts_where_the_fallback_would_deny(self):
@@ -323,7 +323,7 @@ class TestFilePathAskResolution(unittest.TestCase):
         When the target is spelled '~<name>/...' for a name the passwd lookup
             resolves to that same home
         Then the decision is deny -- file_matching.py expands '~name' through
-            the same :func:`toolguard.normalization.expand_tilde` the Bash
+            the same :func:`toolguard.foundation.normalization.expand_tilde` the Bash
             command matcher uses, so this spelling cannot walk past a rule
             keyed on the absolute path
         """

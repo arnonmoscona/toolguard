@@ -10,24 +10,24 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.config import (
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,
     RuntimeVerdict,
 )
-from toolguard.config_divergence import DivergenceCheckResult
-from toolguard.config_types import provenance_for_pattern
-from toolguard.error_log import log_conflict, log_error, log_warning
-from toolguard.invocation import Invocation
-from toolguard.log_writer import (
+from toolguard.configuration.config_divergence import DivergenceCheckResult
+from toolguard.decision_model.vocabulary import provenance_for_pattern
+from toolguard.observability.error_log import log_conflict, log_error, log_warning
+from toolguard.foundation.invocation import Invocation
+from toolguard.observability.log_writer import (
     _DISCOVERY_LOG_FILENAME,
     _DISCOVERY_TAIL_READ_BYTES,
     _parse_discovery_line,
     log_discovery,
     resolve_log_dir,
 )
-from toolguard.permission_resolution import resolve_command_permission
+from toolguard.engine.permission_resolution import resolve_command_permission
 from toolguard.session_start import _count_conflict_entries
 
 
@@ -167,7 +167,7 @@ class TestTakeoverNoticeNotPersisted(unittest.TestCase):
         told about and could not have written to under any implementation, so
         its absence half compared [] with [].
         """
-        from toolguard.session_warnings import issue_takeover_warning
+        from toolguard.observability.session_warnings import issue_takeover_warning
 
         # enterContext first, addCleanup second: cleanups run LIFO, so the cwd
         # is restored before the directory it points into is removed.
@@ -319,7 +319,7 @@ class TestProvenanceHelpers(unittest.TestCase):
         When _append_provenance is called
         Then the reason is returned unchanged (no bracketed suffix)
         """
-        from toolguard.permission_resolution import _append_provenance
+        from toolguard.engine.permission_resolution import _append_provenance
 
         self.assertEqual(_append_provenance("some reason", None), "some reason")
 
@@ -853,7 +853,7 @@ class TestM1SingleSourceWarning(ConfigIsolationMixin, unittest.TestCase):
              and nothing to the error/conflict streams
         """
         from toolguard import hook as hook_mod
-        from toolguard.config import load_configuration
+        from toolguard.configuration.config import load_configuration
 
         _home, proj_root = self.isolate_config_environment()
         claude = proj_root / ".claude"
@@ -895,8 +895,8 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
              the structured log write
         """
         from toolguard import hook as hook_mod
-        from toolguard import once_per_store
-        from toolguard.config import load_configuration
+        from toolguard.foundation import once_per_store
+        from toolguard.configuration.config import load_configuration
 
         _home, proj_root = self.isolate_config_environment()
         store_patcher = patch.object(
@@ -928,9 +928,8 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
         """
         Given a project with a divergent Bash pattern, auto_migrate enabled,
             and migrate() rigged to always fail
-        When toolguard.hook._run_divergence_check runs TWICE for that
-            project (simulating two separate tool-call invocations the same
-            day)
+        When run_auto_migration_for_config runs TWICE for that project
+            (simulating two separate sessions the same day)
         Then migrate() is attempted exactly ONCE and the second call does not
              even re-run the divergence analysis: the divergence_warning claim
              the first call takes short-circuits it before any file is read,
@@ -943,10 +942,9 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
         get_native_permissions count is what makes the named gate the subject;
         the auto_migration claim's own share is the sibling test below.
         """
-        from toolguard import config_divergence as divergence_mod
-        from toolguard import hook as hook_mod
-        from toolguard import once_per_store
-        from toolguard.config import load_configuration
+        from toolguard.configuration import auto_migrate as auto_migrate_mod
+        from toolguard.foundation import once_per_store
+        from toolguard.configuration.config import load_configuration
 
         _home, proj_root = self.isolate_config_environment()
         store_patcher = patch.object(
@@ -968,48 +966,40 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
             )
         )
 
-        log_dir = proj_root / "logs"
-        env_config = {"log_dir": log_dir}
         config = load_configuration(proj_root, ignore_env_override=True)
-        takeover_dict = hook_mod._resolve_takeover_mode(_invocation(config, env_config))
 
         with patch.object(
-            divergence_mod,
-            "get_native_permissions",
-            wraps=divergence_mod.get_native_permissions,
-        ) as mock_native:
+            auto_migrate_mod,
+            "load_configuration",
+            wraps=auto_migrate_mod.load_configuration,
+        ) as mock_analysis:
             with patch(
-                "toolguard.auto_migrate.migrate", return_value=1
+                "toolguard.configuration.auto_migrate.migrate", return_value=1
             ) as mock_migrate:
-                hook_mod._run_divergence_check(
-                    _invocation(config, env_config), takeover_dict
-                )
-                hook_mod._run_divergence_check(
-                    _invocation(config, env_config), takeover_dict
-                )
+                auto_migrate_mod.run_auto_migration_for_config(proj_root, config)
+                auto_migrate_mod.run_auto_migration_for_config(proj_root, config)
 
         self.assertEqual(mock_migrate.call_count, 1)
-        # wraps=, so the real analysis ran: mock_migrate above only reaches 1
-        # if the first call genuinely found the divergent pattern.
-        self.assertEqual(mock_native.call_count, 1)
+        # wraps=, so the real analysis ran: the first call genuinely loaded the
+        # project's config and found the divergent pattern, and the second
+        # short-circuited on the claim before doing any of that again.
+        self.assertEqual(mock_analysis.call_count, 1)
 
     def test_auto_migration_claim_stops_a_second_attempt_on_its_own(self):
         """
-        Given the same project, but with the divergence check stubbed to
-            report divergence on EVERY call, so its own once-per-day claims
-            cannot be what stops the retry
-        When toolguard.hook._run_divergence_check runs twice
+        Given the same project
+        When run_auto_migration_for_config runs twice
         Then run_auto_migration still analyses the project only once, and
              migrate() is still attempted only once
 
-        Isolates the auto_migration claim from the divergence_warning claim.
-        The two mask each other in the sibling test above, where either alone
-        produces the same call_count.
+        Isolates the auto_migration claim. Since TOO-78 moved migration off the
+        hook path, the divergence_warning claim is no longer in this path at
+        all, so this measures the auto_migration claim on its own by
+        construction rather than by stubbing the other one out.
         """
-        from toolguard import auto_migrate as auto_migrate_mod
-        from toolguard import hook as hook_mod
-        from toolguard import once_per_store
-        from toolguard.config import load_configuration
+        from toolguard.configuration import auto_migrate as auto_migrate_mod
+        from toolguard.foundation import once_per_store
+        from toolguard.configuration.config import load_configuration
 
         _home, proj_root = self.isolate_config_environment()
         store_patcher = patch.object(
@@ -1031,35 +1021,19 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
             )
         )
 
-        log_dir = proj_root / "logs"
-        env_config = {"log_dir": log_dir}
         config = load_configuration(proj_root, ignore_env_override=True)
-        takeover_dict = hook_mod._resolve_takeover_mode(_invocation(config, env_config))
-        always_divergent = DivergenceCheckResult(
-            divergent_patterns=["Bash(git push:*)"]
-        )
 
         with patch.object(
-            hook_mod, "check_and_warn_divergence", return_value=always_divergent
-        ) as mock_check:
-            with patch.object(
-                auto_migrate_mod,
-                "load_configuration",
-                wraps=auto_migrate_mod.load_configuration,
-            ) as mock_load:
-                with patch(
-                    "toolguard.auto_migrate.migrate", return_value=1
-                ) as mock_migrate:
-                    hook_mod._run_divergence_check(
-                        _invocation(config, env_config), takeover_dict
-                    )
-                    hook_mod._run_divergence_check(
-                        _invocation(config, env_config), takeover_dict
-                    )
+            auto_migrate_mod,
+            "load_configuration",
+            wraps=auto_migrate_mod.load_configuration,
+        ) as mock_load:
+            with patch(
+                "toolguard.configuration.auto_migrate.migrate", return_value=1
+            ) as mock_migrate:
+                auto_migrate_mod.run_auto_migration_for_config(proj_root, config)
+                auto_migrate_mod.run_auto_migration_for_config(proj_root, config)
 
-        # The stub must be the thing that ran, or the divergence claim is
-        # still in play and this test measures the wrong gate.
-        self.assertEqual(mock_check.call_count, 2)
         self.assertEqual(mock_load.call_count, 1)
         self.assertEqual(mock_migrate.call_count, 1)
 
@@ -1085,7 +1059,7 @@ class TestValidationIssueRoutingByLevel(unittest.TestCase):
         Then the message lands in the ERROR stream and not the warning/conflict streams
         """
         from toolguard import hook as hook_mod
-        from toolguard.config import Issue
+        from toolguard.configuration.config import Issue
 
         with TemporaryDirectory() as proj:
             log_dir = Path(proj) / "logs"
@@ -1110,7 +1084,7 @@ class TestValidationIssueRoutingByLevel(unittest.TestCase):
         Then the message lands in the WARNING stream and not the error/conflict streams
         """
         from toolguard import hook as hook_mod
-        from toolguard.config import Issue
+        from toolguard.configuration.config import Issue
 
         with TemporaryDirectory() as proj:
             log_dir = Path(proj) / "logs"

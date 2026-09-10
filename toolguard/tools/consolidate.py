@@ -40,9 +40,9 @@ from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
 from toolguard.api import decide
-from toolguard.config import Configuration, Provenance
-from toolguard.constants import DECISION_ALLOW
-from toolguard.patterns import PatternType, parse_pattern
+from toolguard.configuration.config import Configuration, Provenance
+from toolguard.foundation.constants import DECISION_ALLOW
+from toolguard.foundation.patterns import PatternType, parse_pattern
 from toolguard.tools.config_access import (
     LayerRules,
     per_layer_rules,
@@ -88,7 +88,7 @@ class ConsolidationProposal:
         kind: ``'literal-alternation'`` or ``'static-subsumption'``.
         tool: Tool name the proposal applies to (e.g. ``'Bash'``).
         list_type: Which permission list is modified.  Always ``'allow'``.
-        layer_provenance: The :class:`~toolguard.config.Provenance` of the
+        layer_provenance: The :class:`~toolguard.configuration.config.Provenance` of the
             config layer holding the patterns being changed.
         removed_patterns: Wrapper-free pattern bodies being removed.
         added_pattern: Wrapper-free body of the replacement rule, or ``None``
@@ -130,7 +130,7 @@ class BroadeningProposal:
             any command starting with that prefix.
         tool: Tool name the proposal applies to (e.g. ``'Bash'``).
         list_type: Which permission list is modified.  Always ``'allow'`` here.
-        layer_provenance: The :class:`~toolguard.config.Provenance` of the config
+        layer_provenance: The :class:`~toolguard.configuration.config.Provenance` of the config
             layer holding the rules being broadened.
         removed_patterns: Wrapper-free bodies of the narrow rules being replaced.
         added_pattern: Wrapper-free body of the single broadened replacement rule.
@@ -231,7 +231,7 @@ def _build_alternation_regex(
 def _static_prefix_of(large_cmd: str, small_cmd: str) -> bool:
     """
     Return True when ``large_cmd`` is a structural prefix of ``small_cmd`` at
-    the same word boundary :func:`~toolguard.permissions.match_command` uses
+    the same word boundary :func:`~toolguard.engine.permissions.match_command` uses
     for a DEFAULT ``:*`` prefix: equality, or ``small_cmd`` continuing after
     ``large_cmd`` with a space. A ``/`` is not a boundary here -- ``/usr/bin``
     does not structurally prefix ``/usr/bin/env``, matching
@@ -810,7 +810,7 @@ def propose_consolidations(
     still changes no decision.
 
     Args:
-        config: The resolved :class:`~toolguard.config.Configuration`.
+        config: The resolved :class:`~toolguard.configuration.config.Configuration`.
         tool: Tool name to inspect (e.g. ``'Bash'``).
         corpus: Optional harvested command corpus
             (:class:`~toolguard.tools.log_harvest.LogEntry` list) replayed as a
@@ -1033,7 +1033,7 @@ def propose_broadening_consolidations(
     judge it; see :class:`BroadeningProposal`.
 
     Args:
-        config: The resolved :class:`~toolguard.config.Configuration`.
+        config: The resolved :class:`~toolguard.configuration.config.Configuration`.
         tool: Tool name to inspect (e.g. ``'Bash'``).
         corpus: Optional harvested command corpus.  It populates
             ``newly_admitted_commands`` and nothing else -- the guard overlaps

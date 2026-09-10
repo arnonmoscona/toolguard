@@ -7,7 +7,7 @@ case-insensitive alphabetical on the full pattern string.
 import unittest
 from types import MappingProxyType
 
-from toolguard.rule_entry import RuleEntry
+from toolguard.decision_model.rule_entry import RuleEntry
 from toolguard.tools.sorters import sort_patterns, sort_layer_rules, stable_rule_key
 
 

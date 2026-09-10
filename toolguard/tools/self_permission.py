@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 from toolguard.api import decide
-from toolguard.config import Configuration
-from toolguard.constants import DECISION_ALLOW, DECISION_DENY
+from toolguard.configuration.config import Configuration
+from toolguard.foundation.constants import DECISION_ALLOW, DECISION_DENY
 
 
 # ---------------------------------------------------------------------------

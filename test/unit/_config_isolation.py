@@ -1,8 +1,8 @@
 """
 Shared test isolation for toolguard's config-discovery hierarchy.
 
-``toolguard.config`` reads real filesystem state from exactly three
-controllable anchors: ``Path.home()``, ``toolguard.config.find_project_root()``,
+``toolguard.configuration.config`` reads real filesystem state from exactly three
+controllable anchors: ``Path.home()``, ``toolguard.configuration.config.find_project_root()``,
 and the ``XDG_CONFIG_HOME``/``CLAUDE_SETTINGS_PATH`` environment variables.
 This repo dogfoods toolguard on itself, so real config genuinely exists on
 the machine running this suite (``~/.claude/toolguard_hook.toml`` and
@@ -11,8 +11,8 @@ derived from ``Path.home()``) -- a test that doesn't redirect all three
 anchors can silently depend on, or be broken by, that real state.
 ``ConfigIsolationMixin`` redirects all three into a fresh temporary directory.
 
-A fourth, separate anchor: ``toolguard.env_config`` has its OWN
-``find_project_root()`` -- distinct from ``toolguard.config``'s, and not
+A fourth, separate anchor: ``toolguard.configuration.env_config`` has its OWN
+``find_project_root()`` -- distinct from ``toolguard.configuration.config``'s, and not
 patched by the three anchors above -- that resolves the log directory
 (``TOOLGUARD_LOG_DIR``, or ``<project_root>/logs`` by default) from the
 process's real ``Path.cwd()``. A test that calls ``toolguard.hook.main()`` (or
@@ -38,7 +38,7 @@ from unittest.mock import patch
 
 class ConfigIsolationMixin:
     """
-    Mixin for unittest.TestCase subclasses exercising toolguard.config discovery.
+    Mixin for unittest.TestCase subclasses exercising toolguard.configuration.config discovery.
 
     Combine via multiple inheritance: class TestFoo(ConfigIsolationMixin, unittest.TestCase).
     Uses TestCase.enterContext() (stdlib, 3.11+) to register cleanup automatically,
@@ -96,7 +96,9 @@ class ConfigIsolationMixin:
         self.enterContext(patch.object(Path, "home", return_value=home))
         self.enterContext(patch.dict(os.environ, env, clear=True))
         self.enterContext(
-            patch("toolguard.config.find_project_root", return_value=project)
+            patch(
+                "toolguard.configuration.config.find_project_root", return_value=project
+            )
         )
         return home, project
 
@@ -108,8 +110,8 @@ def isolate_log_dir_for_module(prefix="too19_module_logs_"):
     For test modules whose tests drive ``toolguard.hook.main()`` end-to-end
     without going through ``ConfigIsolationMixin`` at all -- typically because
     they mock ``toolguard.hook.load_configuration()`` directly and so never
-    reach ``toolguard.config``'s discovery path, but DO reach
-    ``toolguard.env_config.get_env_config()``, which resolves the log
+    reach ``toolguard.configuration.config``'s discovery path, but DO reach
+    ``toolguard.configuration.env_config.get_env_config()``, which resolves the log
     directory independently (see the module docstring above). Retrofitting
     every individual test method in a large file like test_hook.py to call
     ``isolate_config_environment()`` would be a much larger, more invasive

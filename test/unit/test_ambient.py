@@ -1,5 +1,5 @@
 """
-Unit tests for toolguard.ambient: where toolguard reads home, cwd and the
+Unit tests for toolguard.foundation.ambient: where toolguard reads home, cwd and the
 environment.
 
 Resolution happens when something asks, never at import. A binding lasts exactly
@@ -15,8 +15,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard import ambient
-from toolguard.path_utils import (
+from toolguard.foundation import ambient
+from toolguard.foundation.path_utils import (
     absolute_from_cwd,
     iter_dirs_upward,
     resolve_project_root,
@@ -243,7 +243,7 @@ class TestDerivedAccessorsAnswerFromTheFactTheyReadFrom(unittest.TestCase):
         Then it reports the patched value, so a test isolating the environment
              through env() is not bypassed
         """
-        with patch("toolguard.ambient.env", return_value={"K": "patched"}):
+        with patch("toolguard.foundation.ambient.env", return_value={"K": "patched"}):
             self.assertEqual(ambient.env_var("K"), "patched")
 
     def test_a_patched_env_governs_absence_too(self):
@@ -255,7 +255,7 @@ class TestDerivedAccessorsAnswerFromTheFactTheyReadFrom(unittest.TestCase):
              second read of the process environment behind it
         """
         with patch.dict(os.environ, {"TOOLGUARD_TEST_MARKER": "live"}, clear=False):
-            with patch("toolguard.ambient.env", return_value={}):
+            with patch("toolguard.foundation.ambient.env", return_value={}):
                 self.assertEqual(
                     ambient.env_var("TOOLGUARD_TEST_MARKER", "fallback"), "fallback"
                 )
@@ -275,7 +275,7 @@ class TestPatchingAmbientHomeRedirectsPathUtils(unittest.TestCase):
         """
         fake_home = Path("/tmp/one-door-home")
         start = fake_home / "projects" / "thing"
-        with patch("toolguard.ambient.home", return_value=fake_home):
+        with patch("toolguard.foundation.ambient.home", return_value=fake_home):
             walked = list(iter_dirs_upward(start))
 
         self.assertEqual(walked[-1], fake_home)
@@ -294,7 +294,9 @@ class TestPatchingAmbientCwdRedirectsPathUtils(unittest.TestCase):
         When absolute_from_cwd is given a relative path
         Then it lands under the patched directory, not under the process's own
         """
-        with patch("toolguard.ambient.cwd", return_value=Path("/tmp/bound-cwd")):
+        with patch(
+            "toolguard.foundation.ambient.cwd", return_value=Path("/tmp/bound-cwd")
+        ):
             self.assertEqual(
                 absolute_from_cwd("work/thing"), Path("/tmp/bound-cwd/work/thing")
             )
@@ -305,7 +307,9 @@ class TestPatchingAmbientCwdRedirectsPathUtils(unittest.TestCase):
         When absolute_from_cwd is given an absolute path
         Then the path comes back anchored where it already was
         """
-        with patch("toolguard.ambient.cwd", return_value=Path("/tmp/bound-cwd")):
+        with patch(
+            "toolguard.foundation.ambient.cwd", return_value=Path("/tmp/bound-cwd")
+        ):
             self.assertEqual(
                 absolute_from_cwd("/tmp/elsewhere"), Path("/tmp/elsewhere")
             )

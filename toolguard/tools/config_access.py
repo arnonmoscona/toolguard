@@ -3,7 +3,7 @@ Configuration access for toolguard's own skills and dev tooling: per-layer rule 
 with provenance, a structural summary, tool discovery, and a synthetic-config builder
 that applies a proposed rule edit in memory rather than to a file.
 
-TOML parsers discard comments, so a loaded :class:`~toolguard.config.Configuration`
+TOML parsers discard comments, so a loaded :class:`~toolguard.configuration.config.Configuration`
 cannot see the ``#NOSECURITY`` acknowledgement tag. This module re-reads the layer
 file to recover it -- see :func:`_layer_comment_map`.
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, List, Optional, Set, Tuple
 
-from toolguard.config import (
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,
@@ -24,8 +24,8 @@ from toolguard.config import (
     load_configuration,
     wrap_tool_pattern,
 )
-from toolguard.rule_entry import normalize_entry
-from toolguard.rule_sort import (
+from toolguard.decision_model.rule_entry import normalize_entry
+from toolguard.configuration.rule_sort import (
     find_section_boundaries,
     parse_permissions_section_with_comments,
 )
@@ -82,7 +82,7 @@ def load_config(start_dir: Optional[Path] = None) -> Configuration:
     """
     Load the toolguard configuration hierarchy starting from ``start_dir``.
 
-    :func:`~toolguard.config.load_configuration` with
+    :func:`~toolguard.configuration.config.load_configuration` with
     ``ignore_env_override=True``: tooling always wants the project-rooted
     hierarchy, never the single explicit file a stale ``CLAUDE_SETTINGS_PATH``
     would otherwise select.
@@ -92,7 +92,7 @@ def load_config(start_dir: Optional[Path] = None) -> Configuration:
             the current working directory when ``None``.
 
     Returns:
-        An immutable :class:`~toolguard.config.Configuration` object.
+        An immutable :class:`~toolguard.configuration.config.Configuration` object.
     """
     return load_configuration(start_dir, ignore_env_override=True)
 
@@ -102,7 +102,7 @@ def per_layer_rules(config: Configuration, tool_name: str) -> List[LayerRules]:
     Return per-layer allow/deny/ask rules for ``tool_name``, most-specific first.
 
     All three lists come from
-    :meth:`~toolguard.config.Configuration.permission_layers`, which has
+    :meth:`~toolguard.configuration.config.Configuration.permission_layers`, which has
     already applied takeover filtering and normalized structured
     (``{match = ..., ...}``) entries. EVERY discovered layer gets a
     :class:`LayerRules`, including one that contributes no rule for this tool.
@@ -198,7 +198,7 @@ def with_layer_rules_replaced(
     added: List[str],
 ) -> Configuration:
     """
-    Return a new :class:`~toolguard.config.Configuration` with one layer's
+    Return a new :class:`~toolguard.configuration.config.Configuration` with one layer's
     permission list edited.
 
     In the layer identified by ``provenance``, the ``list_type`` list for
@@ -211,7 +211,7 @@ def with_layer_rules_replaced(
     the same list, is shared by reference with the original.
 
     Args:
-        config: The original :class:`~toolguard.config.Configuration`.
+        config: The original :class:`~toolguard.configuration.config.Configuration`.
         tool: Tool name whose list is modified (e.g. ``'Bash'``).
         provenance: Identifies the layer to modify. Only the FIRST matching
             layer is modified.
@@ -220,7 +220,7 @@ def with_layer_rules_replaced(
         added: Pattern bodies to append, in the given order.
 
     Returns:
-        A new :class:`~toolguard.config.Configuration` with the modified layer.
+        A new :class:`~toolguard.configuration.config.Configuration` with the modified layer.
         The original ``config`` object is returned unchanged when ``provenance``
         matches no layer, and also when the matched layer's ``permissions`` is
         not a table or its ``list_type`` value is not a list.

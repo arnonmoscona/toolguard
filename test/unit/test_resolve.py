@@ -1,6 +1,6 @@
 """
 Anti-drift contract test: api.decide() must produce the same verdict as
-calling toolguard.resolve.resolve_*() directly, proving decide() delegates
+calling toolguard.engine.resolve.resolve_*() directly, proving decide() delegates
 rather than duplicating the orchestration logic.
 """
 
@@ -11,14 +11,17 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from toolguard.api import decide
-from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.engine.compound import (
+    FALLBACK_ALLOW_PLACEHOLDER,
+    FALLBACK_DENY_PLACEHOLDER,
+)
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 from toolguard.hook import (
     _log_allowed_command,
     _log_non_allow_decision,
 )
-from toolguard.invocation import Invocation
-from toolguard.resolve import (
+from toolguard.foundation.invocation import Invocation
+from toolguard.engine.resolve import (
     RuntimeVerdict,
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
@@ -1087,7 +1090,7 @@ class TestUndecidableFallbackAutoMode(unittest.TestCase):
 class TestPerRuleAutoModeBehaviorInACompound(unittest.TestCase):
     """
     A compound command's leaves each resolve independently through
-    resolve_command_permission, then _combine_strictest picks/combines
+    resolve_command_permission, then combine_strictest picks/combines
     ALREADY-DECIDED verdicts -- it never re-derives a decision from a rule match.
     So a per-leaf auto_mode_behavior needs no separate handling here; these tests
     confirm that rather than adding new production behaviour.

@@ -1,7 +1,7 @@
 """
 Symlinks in the configuration path: project-root anchoring through a symlinked
 ``.claude``, level attribution, end-to-end verdicts, a symlinked rules file, and the
-symlink resolution that :mod:`toolguard.normalization` applies to command tokens.
+symlink resolution that :mod:`toolguard.foundation.normalization` applies to command tokens.
 
 Isolation exception (`.claude/rules/test-config-isolation.md`): these tests do NOT
 use ConfigIsolationMixin. It patches ``find_project_root``, one of the functions
@@ -17,9 +17,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard import config as config_module
+from toolguard.configuration import config as config_module
 from toolguard.api import decide
-from toolguard.config import load_configuration
+from toolguard.configuration.config import load_configuration
 
 PROJECT_CONFIG = '[permissions]\nallow = ["Bash(ls *)"]\ndeny = ["Bash(curl *)"]\n'
 
@@ -214,7 +214,7 @@ class TestProjectRootThroughSymlink(SymlinkHierarchyTestCase):
 class TestLevelAttributionThroughSymlink(SymlinkHierarchyTestCase):
     """
     Level attribution decides precedence, and a symlink must never shift it. Levels
-    come from :func:`toolguard.config._discover_levels`, the pass that finds each
+    come from :func:`toolguard.configuration.config._discover_levels`, the pass that finds each
     file, so attribution follows where the file was FOUND, not where its bytes live.
     """
 
@@ -504,7 +504,7 @@ class TestSymlinkResolutionInCommandMatching(SymlinkHierarchyTestCase):
 
         Characterisation, not endorsement: matching reads live filesystem state, so a
         verdict describes the target at match time only. That is the observable half
-        of the check-to-use race :mod:`toolguard.resolve` documents; nothing else in
+        of the check-to-use race :mod:`toolguard.engine.resolve` documents; nothing else in
         the suite pins it.
         """
         layout = self.build()
@@ -527,7 +527,7 @@ class TestSymlinkResolutionInCommandMatching(SymlinkHierarchyTestCase):
         Then the command is denied, as it is when it names the target directly
 
         EXPECTED TO FAIL at the time of writing -- an asserted defect, not a
-        regression. :func:`toolguard.normalization.normalize_path` resolves a
+        regression. :func:`toolguard.foundation.normalization.normalize_path` resolves a
         symlink only when it ``exists()``, and ``exists()`` follows the link, so a
         DANGLING link is left as its own spelling and matches no rule written
         against the target. Measured: the dangling link is allowed by the

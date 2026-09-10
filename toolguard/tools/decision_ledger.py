@@ -26,8 +26,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
-from toolguard import ambient
-from toolguard.config import find_project_root
+from toolguard.foundation import ambient
+from toolguard.configuration.config import find_project_root
 
 #: Schema tag written into every ledger file. ``load_ledger`` does not check it.
 LEDGER_SCHEMA = "toolguard-decision-ledger/1"
@@ -356,7 +356,7 @@ def _atomic_write(path: Path, text: str) -> None:
     content rather than a truncated one -- :func:`load_ledger` raises on malformed
     JSON, so a torn write would otherwise make the ledger unreadable from then on.
     ``path``'s parent must already exist. Near-identical to
-    :func:`toolguard.config_write_guard._atomic_write`; kept local rather than
+    :func:`toolguard.configuration.config_write_guard._atomic_write`; kept local rather than
     imported because a decision ledger has no business depending on the config
     layer (a later consolidation is a separate concern).
 

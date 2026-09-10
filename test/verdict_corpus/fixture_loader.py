@@ -6,8 +6,8 @@ Shared between ``tools/corpus_build.py`` (regenerates
 ``cases.jsonl``/``goldens.jsonl``/``e2e_cases.jsonl``/``e2e_goldens.jsonl``)
 and ``test/unit/test_verdict_corpus.py`` (the replay tests), so the two can
 never drift on how a fixture's committed config files become a
-:class:`~toolguard.config.Configuration`, or on how a
-:class:`~toolguard.config_types.RuntimeVerdict` (or a raw hook JSON response)
+:class:`~toolguard.configuration.config.Configuration`, or on how a
+:class:`~toolguard.decision_model.vocabulary.RuntimeVerdict` (or a raw hook JSON response)
 becomes a golden record -- ``corpus_build.py --verify`` and the unit tests
 call the same :func:`compare_goldens`/:func:`compare_e2e_goldens`.
 
@@ -24,7 +24,7 @@ Two corpora live here, for two different seams:
   reason -- deliberately small (subprocess startup dominates), chosen to
   span the output-JSON surface rather than re-exercise decision coverage
   the in-process corpus already has. It is also the only place that can
-  see a :class:`~toolguard.config.ConflictOverride`: ``decide()`` returns
+  see a :class:`~toolguard.configuration.config.ConflictOverride`: ``decide()`` returns
   one on its own ``overrides`` field, but :func:`decision_to_golden`
   deliberately excludes it from the golden schema, and it never appears in
   the hook's JSON output either -- it exists only as an entry in
@@ -56,10 +56,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from toolguard.api import decide
-from toolguard.config import Configuration, ConflictOverride
-from toolguard.config_types import RuntimeVerdict, UnitVerdict
+from toolguard.configuration.config import Configuration, ConflictOverride
+from toolguard.decision_model.vocabulary import RuntimeVerdict, UnitVerdict
 from toolguard.testing.sandbox import Sandbox, experiment
-from toolguard.tool_spec import TOOLS_BY_NAME
+from toolguard.foundation.tool_spec import TOOLS_BY_NAME
 
 CORPUS_DIR = Path(__file__).resolve().parent
 CONFIGS_DIR = CORPUS_DIR / "configs"
@@ -262,7 +262,7 @@ def load_fixture_configuration(
     Materialise one fixture in an isolated sandbox and load its Configuration
     ONCE, for IN-PROCESS replay via :func:`toolguard.api.decide`.
 
-    This is the ONLY place :class:`~toolguard.config.Configuration` is loaded
+    This is the ONLY place :class:`~toolguard.configuration.config.Configuration` is loaded
     for corpus purposes -- callers must run every case for this fixture
     inside the ``with`` block (or at least call the returned ``sanitize``
     function while it is open) rather than reloading per case.
@@ -272,10 +272,10 @@ def load_fixture_configuration(
 
     Yields:
         ``(config, sanitize)`` where ``config`` is the loaded
-        :class:`~toolguard.config.Configuration` and ``sanitize`` strips this
+        :class:`~toolguard.configuration.config.Configuration` and ``sanitize`` strips this
         sandbox's own ephemeral absolute paths out of a string (see
         :func:`_sanitize_ephemeral`), for use when serializing a
-        :class:`~toolguard.config_types.RuntimeVerdict` to a golden record.
+        :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict` to a golden record.
     """
     with _open_fixture_sandbox(fixture_id) as sandbox:
         config = sandbox.load_configuration()
@@ -291,7 +291,7 @@ def load_fixture_sandbox(
     :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`.
 
     Unlike :func:`load_fixture_configuration`, this does NOT load a
-    :class:`~toolguard.config.Configuration` at all -- each
+    :class:`~toolguard.configuration.config.Configuration` at all -- each
     :meth:`~toolguard.testing.sandbox.Sandbox.run_hook` call is its own
     subprocess that re-reads the sandbox's config files itself, exactly like a
     real invocation of the ``toolguard`` binary would. That subprocess
@@ -316,7 +316,7 @@ def provenance_to_dict(
     provenance, sanitize: Callable[[Optional[str]], Optional[str]]
 ) -> Optional[Dict[str, Any]]:
     """
-    Convert a :class:`~toolguard.config.Provenance` (or ``None``) to a
+    Convert a :class:`~toolguard.configuration.config.Provenance` (or ``None``) to a
     JSON-safe, sandbox-path-sanitized dict.
 
     Args:
@@ -342,12 +342,12 @@ def unit_verdict_to_dict(
     unit: UnitVerdict, sanitize: Callable[[Optional[str]], Optional[str]]
 ) -> Dict[str, Any]:
     """
-    Convert one :class:`~toolguard.config_types.UnitVerdict` (one entry of
+    Convert one :class:`~toolguard.decision_model.vocabulary.UnitVerdict` (one entry of
     ``RuntimeVerdict.sub_matches``) to a JSON-safe, sandbox-path-sanitized
     dict for the golden schema's ``sub_matches`` list (see
     :func:`decision_to_golden` for why this list exists).
 
-    Deliberately narrower than the full :class:`~toolguard.config_types.UnitVerdict`:
+    Deliberately narrower than the full :class:`~toolguard.decision_model.vocabulary.UnitVerdict`:
     only ``sub_command``/``decision``/``matched_rule``/``provenance``.
     ``reason``/``additional_context`` are per-unit prose, not the structural
     identity this pins (the compound's own ``reason``/``additional_context``
@@ -383,12 +383,12 @@ def override_to_dict(
 
     Args:
         identifier: The deciding sub-command string (Bash) or the target
-            path (file-path); see :class:`~toolguard.config_types.RuntimeVerdict`'s
+            path (file-path); see :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict`'s
             ``overrides`` docstring for the identifier convention. Never
             ``None`` in practice for a golden produced from ``decide()``'s
             return value, but sanitized defensively the same way every
             other optional string here is.
-        override: The :class:`~toolguard.config.ConflictOverride`.
+        override: The :class:`~toolguard.configuration.config.ConflictOverride`.
         sanitize: Ephemeral-path sanitizer from :func:`load_fixture_configuration`.
 
     Returns:
@@ -413,7 +413,7 @@ def decision_to_golden(
 ) -> Dict[str, Any]:
     """
     Build one golden record (the schema stored in ``goldens.jsonl``) from a
-    replayed :class:`~toolguard.config_types.RuntimeVerdict`.
+    replayed :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict`.
 
     ``sub_matches``/``overrides`` guard the compound sub-command breakdown
     against being silently dropped or reordered -- the failure mode this
@@ -584,7 +584,7 @@ def _new_stream_log_text(before: Dict[Path, str], after: Dict[Path, str]) -> str
     Return the text APPENDED to a log stream between two
     :func:`_stream_log_snapshot` calls taken immediately before/after one
     :meth:`~toolguard.testing.sandbox.Sandbox.run_hook` call -- the only way
-    this corpus can observe :class:`~toolguard.config.ConflictOverride`
+    this corpus can observe :class:`~toolguard.configuration.config.ConflictOverride`
     (routed to the ``'conflict'`` stream): it never reaches
     :func:`toolguard.api.decide`'s return value or the hook's JSON output
     (see the end-to-end corpus's module-level rationale above), and neither
@@ -631,7 +631,7 @@ def build_hook_payload(tool: str, target: str) -> Dict[str, Any]:
     Returns:
         ``{"tool_name": tool, "tool_input": {...}}`` -- ``run_hook`` fills in
         ``cwd``/``hook_event_name``/``session_id`` defaults. The payload key
-        comes from the :mod:`toolguard.tool_spec` registry, so a registered
+        comes from the :mod:`toolguard.foundation.tool_spec` registry, so a registered
         tool's target reaches the hook under its own key (``file_path`` for
         Read/Write/Edit today) and an unregistered tool falls back to
         ``command`` -- matching real Claude Code events.
@@ -656,7 +656,7 @@ def e2e_decision_to_golden(
 
     Deliberately golds the FULL response shape (minus the two
     ``run_hook``-only diagnostic keys) rather than re-deriving fields from a
-    :class:`~toolguard.config_types.RuntimeVerdict` -- the presence or absence
+    :class:`~toolguard.decision_model.vocabulary.RuntimeVerdict` -- the presence or absence
     of the ``additionalContext`` key is exactly the seam this corpus exists to
     guard, and only the real subprocess response can show it.
 
@@ -670,7 +670,7 @@ def e2e_decision_to_golden(
         conflict_message: The text newly appended to the ``'conflict'`` log
             stream by THIS case (see :func:`_new_stream_log_text`), already
             sanitized, or ``None`` when no conflict was logged. This is the
-            only observable trace of a :class:`~toolguard.config.ConflictOverride`
+            only observable trace of a :class:`~toolguard.configuration.config.ConflictOverride`
             -- and the only place the OVERRIDDEN deny's provenance is
             observable at all, since it is embedded in this message's text (see
             ``hook._format_conflict_message``) and nowhere else this corpus

@@ -2,7 +2,7 @@
 The ``toolguard-migrate`` console script.
 
 A thin CLI wrapper -- argument parsing, project-root resolution, exit code --
-around :func:`toolguard.permission_migration.migrate`, which merges permission
+around :func:`toolguard.configuration.permission_migration.migrate`, which merges permission
 patterns from Claude's ``settings.local.json`` into toolguard configuration
 files with timestamped backups and a dry-run preview mode.
 
@@ -14,8 +14,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from toolguard.config import find_project_root
-from toolguard.permission_migration import migrate
+from toolguard.configuration.config import find_project_root
+from toolguard.configuration.permission_migration import migrate
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,7 +68,7 @@ def main() -> int:
     """
     Resolve the project root and run the migration.
 
-    This is where a :class:`~toolguard.permission_migration.MigrationOutcome`
+    This is where a :class:`~toolguard.configuration.permission_migration.MigrationOutcome`
     becomes a shell exit code, and it should stay the only such place.
 
     Returns:

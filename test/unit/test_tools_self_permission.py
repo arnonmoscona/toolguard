@@ -19,7 +19,7 @@ from types import MappingProxyType
 from typing import List, Optional
 
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.self_permission import (
     evaluate_self_permissions,
     missing_self_permissions,

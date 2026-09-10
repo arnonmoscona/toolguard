@@ -19,7 +19,7 @@ says which of them wins.
 from dataclasses import dataclass
 from typing import List, Optional
 
-from toolguard.config import Configuration, Provenance
+from toolguard.configuration.config import Configuration, Provenance
 from toolguard.tools.config_access import per_layer_rules
 from toolguard.tools.pattern_overlap import default_prefix_tokens, prefixes_overlap
 

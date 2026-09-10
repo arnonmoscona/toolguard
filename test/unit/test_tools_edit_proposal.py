@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.config_access import (
     per_layer_rules,
     with_layer_allow_replaced,

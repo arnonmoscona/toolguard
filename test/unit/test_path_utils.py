@@ -1,6 +1,6 @@
 """
-Unit tests for toolguard.path_utils: the path helpers that answer against
-machine state supplied by toolguard.ambient.
+Unit tests for toolguard.foundation.path_utils: the path helpers that answer against
+machine state supplied by toolguard.foundation.ambient.
 
 A '~' is expanded against the ambient home rather than pathlib's, which reads
 $HOME and then the passwd entry -- two routes no ambient binding governs.
@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard import ambient
-from toolguard.path_utils import expanduser
+from toolguard.foundation import ambient
+from toolguard.foundation.path_utils import expanduser
 
 
 class TestExpanduserAnswersFromTheAmbientHome(unittest.TestCase):
@@ -29,7 +29,9 @@ class TestExpanduserAnswersFromTheAmbientHome(unittest.TestCase):
         Then it lands under the patched home, so a '~' in configuration cannot
              route around a test that redirected home
         """
-        with patch("toolguard.ambient.home", return_value=Path("/patched/home")):
+        with patch(
+            "toolguard.foundation.ambient.home", return_value=Path("/patched/home")
+        ):
             self.assertEqual(
                 expanduser("~/.toolguard"), Path("/patched/home/.toolguard")
             )
@@ -41,7 +43,9 @@ class TestExpanduserAnswersFromTheAmbientHome(unittest.TestCase):
              user's '~name' form
         Then none of them is rewritten to the patched home
         """
-        with patch("toolguard.ambient.home", return_value=Path("/patched/home")):
+        with patch(
+            "toolguard.foundation.ambient.home", return_value=Path("/patched/home")
+        ):
             for raw, expected in (
                 ("/abs/path", Path("/abs/path")),
                 ("rel/path", Path("rel/path")),

@@ -1,5 +1,5 @@
 """
-Unit tests for :func:`toolguard.config.load_configuration` and the
+Unit tests for :func:`toolguard.configuration.config.load_configuration` and the
 :class:`Configuration` public API, plus the internal delegating helper
 ``config_sync_settings_from_sources`` that ``auto_migrate`` uses.
 
@@ -18,10 +18,10 @@ from types import MappingProxyType
 from typing import Optional, Sequence
 from unittest.mock import patch
 
-import toolguard.config as config_module
+import toolguard.configuration.config as config_module
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard import error_reporter
-from toolguard.config import (
+from toolguard.observability import error_reporter
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Issue,
@@ -32,15 +32,15 @@ from toolguard.config import (
     config_sync_settings_from_sources,
     load_configuration,
 )
-from toolguard.config_types import LevelMatch, entry_for_pattern
-from toolguard.permission_resolution import resolve_permission_cascade
-from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY, RuleEntry
+from toolguard.decision_model.vocabulary import LevelMatch, entry_for_pattern
+from toolguard.engine.permission_resolution import resolve_permission_cascade
+from toolguard.decision_model.rule_entry import ADDITIONAL_CONTEXT_KEY, RuleEntry
 
 
 def _resolve_via_cascade(config, tool_name, decide, subject="Command"):
     """Resolve *tool_name* against *config*, matching each level with *decide* (a
     test-local stand-in, never a real matcher) before folding via
-    :func:`~toolguard.permission_resolution.resolve_permission_cascade`."""
+    :func:`~toolguard.engine.permission_resolution.resolve_permission_cascade`."""
     levels = config.permission_levels_with_provenance(tool_name)
     matched_levels = [
         (decide(allow, deny, ask), layers) for allow, deny, ask, layers in levels
@@ -2700,7 +2700,7 @@ def _toml_permissions_block(allow=(), deny=(), ask=()):
 class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
     """_rules_dirs(), _discover_rules_files_multi() (single-directory scan
     behavior, exercised with a one-element tuple -- equivalent to scanning
-    that directory alone, since :func:`toolguard.config._merged_rules_by_stem`
+    that directory alone, since :func:`toolguard.configuration.config._merged_rules_by_stem`
     only merges across MULTIPLE directories), and end-to-end discovery via
     load_configuration() into the user level."""
 
@@ -4177,7 +4177,7 @@ class TestAdditionalContextResolution(unittest.TestCase):
 
 
 class TestEntryForPatternLookup(unittest.TestCase):
-    """:func:`~toolguard.config_types.entry_for_pattern`, built from
+    """:func:`~toolguard.decision_model.vocabulary.entry_for_pattern`, built from
     hand-constructed ToolPatternLayer objects with no file I/O, so
     ConfigIsolationMixin isn't needed (see
     .claude/rules/test-config-isolation.md)."""

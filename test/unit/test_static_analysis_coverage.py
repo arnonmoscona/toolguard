@@ -458,7 +458,7 @@ class TestSanctionedPyscnExclusion(unittest.TestCase):
             )
 
         excluded = REPO_ROOT / "toolguard" / "parser" / "bash_parser.py"
-        ordinary = REPO_ROOT / "toolguard" / "patterns.py"
+        ordinary = REPO_ROOT / "toolguard" / "foundation" / "patterns.py"
         for path in (excluded, ordinary):
             self.assertTrue(path.is_file(), f"{path} has moved; this test is stale.")
 

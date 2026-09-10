@@ -1,5 +1,5 @@
 """
-Unit tests for toolguard.once_per: the once-per-period facade
+Unit tests for toolguard.foundation.once_per: the once-per-period facade
 (``day`` / ``OncePer`` / ``Repeat``).
 """
 
@@ -12,8 +12,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from test.unit import _real_once_per_home_guard
-from toolguard import once_per, once_per_store
-from toolguard.once_per_store import ClaimStatus
+from toolguard.foundation import once_per, once_per_store
+from toolguard.foundation.once_per_store import ClaimStatus
 
 
 def _period_with_retention(retention):

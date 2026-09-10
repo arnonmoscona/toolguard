@@ -1,6 +1,6 @@
-"""Re-export of the project-root primitives implemented in :mod:`toolguard.path_utils`."""
+"""Re-export of the project-root primitives implemented in :mod:`toolguard.foundation.path_utils`."""
 
-from toolguard.path_utils import (
+from toolguard.foundation.path_utils import (
     CONFIG_ROOT_INDICATORS,
     DEFAULT_INDICATORS,
     ProjectRootResolution,

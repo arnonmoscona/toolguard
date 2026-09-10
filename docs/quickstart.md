@@ -158,7 +158,7 @@ it by hand, set in `toolguard_hook.toml`:
 
 ```toml
 [config_sync]
-auto_migrate = true   # fold settings.local.json rules in on every hook startup
+auto_migrate = true   # fold settings.local.json rules in at session start, at most once a day
 ```
 
 Off by default -- turn it on once you trust your rule set (dry-run first), and keep it off

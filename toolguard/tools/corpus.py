@@ -16,7 +16,7 @@ Read-only; nothing is written.
 from pathlib import Path
 from typing import List, Optional
 
-from toolguard import error_reporter
+from toolguard.observability import error_reporter
 from toolguard.tools.log_harvest import LogEntry, harvest
 from toolguard.tools.project_root import resolve_project_root
 from toolguard.tools.transcript_harvest import (
@@ -69,7 +69,7 @@ def harvest_corpus(
     directory contributes nothing rather than raising, so a project with no logs
     yet still yields whatever transcripts exist, and vice versa -- but a
     directory that does not exist at all is reported via
-    :func:`~toolguard.error_reporter.report_warning`, so an empty corpus
+    :func:`~toolguard.observability.error_reporter.report_warning`, so an empty corpus
     caused by a wrong path is not silently indistinguishable from a clean
     harvest.
 

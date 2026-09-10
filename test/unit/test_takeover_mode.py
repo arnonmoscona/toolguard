@@ -10,7 +10,7 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.config import (
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,
@@ -19,8 +19,8 @@ from toolguard.config import (
     load_configuration,
 )
 from toolguard.hook import load_file_path_patterns
-from toolguard.invocation import Invocation
-from toolguard.permission_resolution import resolve_command_permission
+from toolguard.foundation.invocation import Invocation
+from toolguard.engine.permission_resolution import resolve_command_permission
 
 #: The four blanket allows takeover suppresses by default. Seeded by
 #: Configuration.takeover_mode() whether or not takeover is enabled, so a

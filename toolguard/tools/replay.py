@@ -21,9 +21,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from toolguard.api import decide
-from toolguard.config import Configuration
-from toolguard.config_types import RuntimeVerdict
-from toolguard.constants import (
+from toolguard.configuration.config import Configuration
+from toolguard.decision_model.vocabulary import RuntimeVerdict
+from toolguard.foundation.constants import (
     DECISION_ALLOW,
     DECISION_ASK,
     DECISION_DENY,

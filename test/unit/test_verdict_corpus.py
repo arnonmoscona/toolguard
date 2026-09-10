@@ -40,10 +40,10 @@ from test.verdict_corpus.fixture_loader import (
     load_fixture_configuration,
     read_jsonl,
 )
-from toolguard.constants import FILE_TOOLS
-from toolguard.file_matching import check_file_path_hard_deny
-from toolguard.invocation import Invocation
-from toolguard.tool_spec import ToolKind, ToolSpec
+from toolguard.foundation.constants import FILE_TOOLS
+from toolguard.engine.file_matching import check_file_path_hard_deny
+from toolguard.foundation.invocation import Invocation
+from toolguard.foundation.tool_spec import ToolKind, ToolSpec
 
 #: Set to "1" to acknowledge already-reviewed TRACKED-tier differences without
 #: regenerating goldens.jsonl.
@@ -295,7 +295,7 @@ class TestBuildHookPayloadPayloadKeySeam(unittest.TestCase):
     """``build_hook_payload`` dispatches through the tool_spec registry, not a hardcoded literal."""
 
     @patch.dict(
-        "toolguard.tool_spec.TOOLS_BY_NAME",
+        "toolguard.foundation.tool_spec.TOOLS_BY_NAME",
         {
             "Read": ToolSpec(
                 name="Read",

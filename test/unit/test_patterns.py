@@ -2,7 +2,7 @@
 
 import os
 import unittest
-from toolguard.patterns import PatternType, parse_pattern, match_pattern
+from toolguard.foundation.patterns import PatternType, parse_pattern, match_pattern
 
 
 class TestParsePattern(unittest.TestCase):

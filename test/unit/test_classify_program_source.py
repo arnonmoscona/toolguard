@@ -9,7 +9,7 @@ material a file, or not. It is the classifier a rule's
 
 import unittest
 
-from toolguard.constants import PROGRAM_SOURCE_FILE, PROGRAM_SOURCE_NOT_FILE
+from toolguard.foundation.constants import PROGRAM_SOURCE_FILE, PROGRAM_SOURCE_NOT_FILE
 from toolguard.parser.command_extractor import classify_program_source
 
 

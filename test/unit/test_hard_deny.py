@@ -7,13 +7,18 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.config import ConfigLayer, Configuration, Provenance, load_configuration
-from toolguard.config_divergence import DivergenceCheckResult
+from toolguard.configuration.config import (
+    ConfigLayer,
+    Configuration,
+    Provenance,
+    load_configuration,
+)
+from toolguard.configuration.config_divergence import DivergenceCheckResult
 from toolguard.hook import resolve_file_path_permission_detailed
-from toolguard.invocation import Invocation
-from toolguard.permissions import check_hard_deny
-from toolguard.resolve import resolve_bash_permission_detailed
-from toolguard.rule_entry import normalize_entry
+from toolguard.foundation.invocation import Invocation
+from toolguard.engine.permissions import check_hard_deny
+from toolguard.engine.resolve import resolve_bash_permission_detailed
+from toolguard.decision_model.rule_entry import normalize_entry
 
 
 def _write(claude_dir: Path, filename: str, content: str) -> None:
@@ -302,7 +307,7 @@ class TestHardDenyStructuredEntries(_IsolatedEnvTestCase):
         # entry from a native layer anyway, so the skip and the rejection mask
         # each other. Only the call count observes which one acted.
         with patch(
-            "toolguard.config.normalize_entry", wraps=normalize_entry
+            "toolguard.configuration.config.normalize_entry", wraps=normalize_entry
         ) as spy_normalize:
             self.assertEqual(config.hard_deny_entries("Bash"), ((), ()))
             self.assertEqual(config.hard_deny("Bash"), ((), ()))

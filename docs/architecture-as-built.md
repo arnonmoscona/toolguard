@@ -1,6 +1,6 @@
 # Architecture, as built
 
-As of 2026-09-07 -- toolguard 0.7.0
+As of 2026-09-10 -- toolguard 0.7.1
 
 <sub>No commit hash: it cannot be known before the commit that would carry it, so it was always one revision stale. The version and date are advanced by the pre-push checklist, which is what keeps this line honest.</sub>
 
@@ -13,6 +13,24 @@ It is organised in three parts.
 - **Sections 10-13, the mechanisms that path runs on**: the config hierarchy, pattern matching, the write chokepoint, and the logs. Sections 10 and 11 zoom into two steps of section 8; 12 and 13 cover what happens off the decision path.
 
 It complements [technical-notes.md](../technical-notes.md), on phase-by-phase design rationale.
+
+**Contents**
+
+- [1. What toolguard has to do, and what it may not](#1-what-toolguard-has-to-do-and-what-it-may-not)
+- [2. Standard library only](#2-standard-library-only)
+- [3. All bash parsing goes through the PEG grammar](#3-all-bash-parsing-goes-through-the-peg-grammar)
+- [4. Two halves: the core runtime and the operator tooling](#4-two-halves-the-core-runtime-and-the-operator-tooling)
+- [5. What Claude Code owns lives in one leaf](#5-what-claude-code-owns-lives-in-one-leaf)
+- [6. The layer model](#6-the-layer-model)
+- [7. The verdict altitudes: LevelMatch, UnitVerdict, RuntimeVerdict](#7-the-verdict-altitudes-levelmatch-unitverdict-runtimeverdict)
+- [8. The decision path, end to end](#8-the-decision-path-end-to-end)
+- [9. The runtime dependency no import graph shows](#9-the-runtime-dependency-no-import-graph-shows)
+- [10. The configuration hierarchy](#10-the-configuration-hierarchy)
+- [11. Pattern matching](#11-pattern-matching)
+- [12. Writing configuration](#12-writing-configuration)
+- [13. Logging](#13-logging)
+- [Sources](#sources)
+
 
 A note on how to read the claims below. This document states what the code does. Where a mechanism is checked by a test or a tool, that is named, including its limits. Where nothing checks it, that is said too. Counts of tests, modules and lines are deliberately kept out of this document or rounded, because they decay faster than the architecture does -- ask the test runner and the tree.
 
@@ -62,7 +80,7 @@ Measured on this machine, against this repository's config: the installed 0.5.1 
 
 The runtime has no third-party dependencies. This is a constraint, not a description of the current state.
 
-`pyproject.toml` declares `dependencies = []`. An AST scan of all 77 modules under `toolguard/` finds zero imports whose root package is neither the standard library nor `toolguard` itself.
+`pyproject.toml` declares `dependencies = []`. An AST scan of every module under `toolguard/` finds zero imports whose root package is neither the standard library nor `toolguard` itself -- that is `tools/architecture_fitness.py --stdlib`, which is run before every push.
 
 Two reasons it is worth the cost:
 
@@ -118,7 +136,7 @@ Sections 5-8 describe the hook. The hook is the smaller half.
 
 | | core runtime | operator tooling |
 |---|---|---|
-| where | `toolguard/*.py`, `toolguard/parser/` | `toolguard/tools/` |
+| where | the layer packages plus the flat entry points -- everything under `toolguard/` except the three below | `toolguard/tools/`, `toolguard/scripts/` |
 | size | 43 modules, roughly 27k lines | 30 modules, roughly 12k lines |
 | invoked by | Claude Code, once per tool call | a person, or one of the skills |
 | dependencies | standard library only | standard library only (it ships in the wheel) |
@@ -130,13 +148,27 @@ Sections 5-8 describe the hook. The hook is the smaller half.
 
 Tooling is roughly a third of those two halves taken together. It holds the installer, the maintenance and security-audit engines behind the two skills, the rule analyzers (danger, redundancy, consolidation, pattern overlap), the corpus/replay/mining machinery, and the self-integrity and self-permission checks. [skills.md](skills.md) covers the skill-facing surface.
 
-**`toolguard/tools/` is not the dev-only tree.** `pyproject.toml` packages all of `toolguard`, so operator tooling ships to users and section 2's rule binds it too. The dev-only tree is the *top-level* `tools/`, outside the package, where the fitness functions live.
+**`toolguard/tools/` is not the dev-only tree.** `pyproject.toml` packages all of `toolguard`, so operator tooling ships to users and section 2's rule binds it too. The dev-only tree is the *top-level* `tools/`, outside the package, where the fitness functions and the diagram generators live.
+
+#### Its internal shape
+
+`toolguard/tools/` has no sub-packages -- it is a flat pile of modules, deliberately so far, since the layering effort has gone to the half that decides. Its structure is still legible, and colour here is role rather than package: an **entry point** is imported by nothing else in `tools/`, a **primitive** imports nothing else there.
+
+<img src="diagrams/module-tools.png" alt="Internal structure of toolguard/tools/" width="100%">
+
+<sub>[diagram source](diagrams/module-tools.dot) -- regenerate with `tools/diagram_experiments.py --view tools`</sub>
+
+Three entry points carry it: `maintenance` and `security_audit` behind the two skills, and `installer` behind the install console script. `config_access` is the most-used primitive.
+
+**It is two disconnected sub-systems, not one.** The installer island -- `update_skills -> installer -> {recommended_protections, self_integrity, self_permission, uninstall_readiness}` -- shares no edge with the maintenance/security-audit cluster. That is the natural seam if this package is ever given sub-packages. Two modules are isolated outright: `sorters`, which nothing there imports and which imports nothing there, and the package `__init__`.
 
 **The two halves meet at one decision seam.** `toolguard/api.py` exposes `decide()`. `hook.py` calls it on the `--eval` path only, reaching `resolve.py`'s two resolvers directly on the live path (section 8); `tools/replay.py` and the audit path call `decide()`. Neither half imports the other, which is what the `api` layer exists to prevent -- section 6 has that history.
 
 **The write direction is the other seam, and it is less clean.** `config_write_guard.py` is where every toolguard config write is meant to happen: parse the candidate text, optionally verify no existing rule pattern is being dropped, then write atomically.
 
-Four modules import it: `tools/maintenance.py`, `tools/installer.py`, `tools/rule_apply.py` -- and `permission_migration.py`, which is core, not tooling. The hook can trigger a permission migration on the live path when `auto_migrate` is enabled, at most once per calendar day per project.
+Four modules import it: `tools/maintenance.py`, `tools/installer.py`, `tools/rule_apply.py` -- and `configuration/permission_migration.py`, which is core, not tooling.
+
+That last one used to make the seam worse: the hook itself could trigger a permission migration on the live path when `auto_migrate` was enabled. It no longer can. Automatic migration runs from `session_start` instead, still at most once per calendar day per project. The hook path had two problems -- the migration workflow reports to stdout, which for the hook is the channel carrying its JSON decision, and a backup-and-rewrite of config files does not belong inside a call on a tens-of-milliseconds budget.
 
 So "core reads, tooling writes" is the shape but not the rule, and nothing enforces the chokepoint. `--layers` does not look at writes; neither does anything else.
 
@@ -157,7 +189,7 @@ Each one changes a permission config in a direction the operator did not ask for
 
 toolguard mirrors part of somebody else's specification: the PreToolUse/SessionStart wire protocol, and the wrapper names Claude Code strips before matching a Bash rule. Before this ticket, those facts were spelled as bare string literals -- twelve wire-protocol field names, measured at 45 sites across 6 package modules and roughly 696 across the test suite, with `additionalContext` alone accounting for 7 package sites and 188 test sites. Nothing anywhere *stated* the contract; the tests encoded it by repetition, which is not the same thing -- an upstream rename would change hundreds of lines, and no single one of them would ever have said what the field was, who owns it, or when it was last checked.
 
-`toolguard/claude_code_contract.py` is now that one place. Every constant carries a citation -- module-wide for the wire-protocol block, per-constant-group for the payload keys and `STRIPPED_WRAPPERS` -- naming the doc URL, the section, and a `VERIFIED` date. `.claude/rules/native-fidelity-claims.md` requires exactly that beside any claim about Claude Code's own behaviour; this module is where the requirement gets a permanent home instead of being re-satisfied ad hoc at each call site.
+`toolguard/integration/claude_code_contract.py` is now that one place. Every constant carries a citation -- module-wide for the wire-protocol block, per-constant-group for the payload keys and `STRIPPED_WRAPPERS` -- naming the doc URL, the section, and a `VERIFIED` date. `.claude/rules/native-fidelity-claims.md` requires exactly that beside any claim about Claude Code's own behaviour; this module is where the requirement gets a permanent home instead of being re-satisfied ad hoc at each call site.
 
 <img src="diagrams/external-contract-leaf.png" alt="claude_code_contract.py as a foundation leaf, and which layers import it" width="55%">
 
@@ -195,13 +227,19 @@ The mitigation is a dated constant plus a periodic re-read of Claude Code's docu
 
 ## 6. The layer model
 
-`.pyscn.toml` declares eight layers. A module may import its own layer and any layer below it.
+`.pyscn.toml` declares eleven layers, one per package. Since TOO-78 the *directory* is the declaration: a module's layer is the package it lives in, so a module cannot be misfiled by forgetting to declare it.
 
-<img src="diagrams/layer-stack.png" alt="The eight-layer stack" width="50%">
+<img src="diagrams/layer-stack.png" alt="The layer stack" width="50%">
 
 <sub>[diagram source](diagrams/layer-stack.mmd)</sub>
 
-The two ends of the stack are special, for opposite reasons. `foundation` is genuinely leaf: no toolguard imports at all, or only other foundation modules. `support` (`toolguard/testing/`) sits on top because nothing else may depend on it. It is a development sandbox, never imported by production code.
+Permitted dependencies are declared as a DAG in `[architecture.dag]`, and its edges are **transitive**: `A -> B` and `B -> C` grants A the whole of C's subtree. Only the minimal edges are declared -- nine of them -- and `--layers` computes the closure, prints it, and asserts that the expanded `[[architecture.rules]]` pyscn reads still equals it. Acyclicity is the hard gate: a dependency loop costs the ability to reason about the code and admits a family of import-order bugs.
+
+Transitivity has a cost worth knowing before adding an edge, which is why the closure is printed: one new edge grants everything below its target at once.
+
+The two ends of the stack are special, for opposite reasons. `integration` is a sink -- it describes Claude Code's wire format and imports nothing, so every layer may depend on it. `support` (`toolguard/testing/`) sits on top because nothing else may depend on it. It is a development sandbox, never imported by production code.
+
+`engine` reaches `model`, not `configuration`. The decision machinery shares a type vocabulary with the configuration layer without being able to load, discover or validate configuration -- so a stray `from toolguard.configuration.config import load_configuration` inside `engine/` is a direction violation rather than a legal import nobody notices.
 
 ### Which module sits where
 
@@ -209,14 +247,47 @@ This is the layer map itself, from `.pyscn.toml`. The table below is checked aga
 
 | layer | modules |
 |---|---|
-| `foundation` | `ambient`, `claude_code_contract`, `constants`, `issues`, `path_utils`, `normalization`, `patterns`, `toml_scan`, `_git`, `install_provenance`, `install_update`, `file_lock`, `tool_spec`, `invocation` |
-| `observability` | `log_writer`, `error_log`, `session_warnings`, `update_check`, `once_per_store`, `once_per`, `error_reporter`, `auto_mode_trace` |
-| `config` | `rule_entry`, `config_types`, `config`, `config_validation`, `config_write_guard`, `env_config`, `rule_sort`, `auto_migrate`, `config_divergence`, `permission_migration` |
-| `engine` | `permissions`, `compound`, `resolve`, `permission_resolution`, `file_matching`, `parser/` |
+| `integration` | `integration/` |
+| `foundation` | `foundation/` |
+| `decision_model` | `decision_model/` |
+| `install` | `install/` |
+| `observability` | `observability/` |
+| `configuration` | `configuration/` |
+| `engine` | `engine/`, `parser/` |
 | `api` | `api` |
 | `runtime` | `hook`, `session_start`, `subagent` |
 | `tooling` | `tools/`, `scripts/` |
 | `support` | `testing/` |
+
+### What each package is for
+
+| package | what it holds |
+|---|---|
+| `integration/` | Claude Code's wire contract -- the PreToolUse and SessionStart event shapes, the response shape, and the wrapper list native permission matching strips |
+| `foundation/` | Leaf primitives: ambient state access, path and pattern handling, shared constants, cross-process file locking, the once-per-period throttle |
+| `decision_model/` | The vocabulary a decision is expressed in: rule entries, the three verdict altitudes, level matches, provenance, and the context protocols the engine resolves against |
+| `install/` | Which copy of toolguard is governing this process, and whether it has drifted from its own checkout |
+| `observability/` | Logging, error reporting and session warnings -- side-effecting leaves, deliberately below `configuration` so config code can warn through them |
+| `configuration/` | The configuration model, hierarchy discovery, validation, the write chokepoint, and permission migration |
+| `engine/`, `parser/` | The decision machinery: bash decomposition through the PEG grammar, pattern matching, and the more-specific-wins cascade |
+| `api.py` | The engine's public decision interface. One function, `decide()`, with no side effects |
+| `hook.py`, `session_start.py`, `subagent.py` | The entry points. They orchestrate an invocation and decide nothing themselves |
+| `tools/`, `scripts/` | Operator tooling behind the skills, plus the console-script wrappers |
+| `testing/` | The sandbox for asking "what would this config decide?". Nothing depends on it |
+
+### The module graph
+
+Every module-level import reachable from the entry points, transitively reduced -- an edge implied by a longer path is not drawn, so this shows structure rather than every consequence of it. Runtime callbacks and injected dependencies are not here; only imports.
+
+<img src="diagrams/module-hooks.png" alt="Module dependency graph, from the entry points down" width="100%">
+
+<sub>[diagram source](diagrams/module-hooks.dot) -- regenerate with `tools/diagram_experiments.py`</sub>
+
+Two boxes serve readability and mean nothing to the layer map: **`top_level`** collects the flat entry points, and **"decision machinery"** groups `decision_model/`, `engine/` and `parser/`. `configuration -> decision_model` is a real edge and still drawn.
+
+Three things are worth reading off it. `hook` has few direct edges and reaches the engine only through `api`. `session_start` never reaches the engine at all, which is right -- it decides nothing. And `engine`/`parser` have no edge into `configuration`, which is the seal section 6 opened with.
+
+**The whole package is acyclic**, checked three ways -- across every module, across everything reachable from the entry points, and within `tools/`. That is the property the DAG declaration exists to keep.
 
 ### Why `observability` sits below `config`
 
@@ -276,7 +347,7 @@ A second, narrower check sits on the type story (section 7). `--predicates` veri
 
 ## 7. The verdict altitudes: `LevelMatch`, `UnitVerdict`, `RuntimeVerdict`
 
-A permission decision is not one value. `toolguard/config_types.py` defines three classes, each describing a decision at a different altitude.
+A permission decision is not one value. `toolguard/decision_model/vocabulary.py` defines three classes, each describing a decision at a different altitude.
 
 <img src="diagrams/verdict-altitudes.png" alt="The three verdict altitudes" width="50%">
 
@@ -385,7 +456,7 @@ None of the four has a production caller. `resolve.py` drives `decompose`, `judg
 
 ## 9. The runtime dependency no import graph shows
 
-`permission_resolution.py`'s own module docstring states it "never imports `toolguard.config` or `toolguard.resolve`" -- and that is true; its only toolguard imports are `config_types`, `permissions`, and `file_matching`. But at runtime, every call to `resolve_command_permission` or `resolve_file_path_permission` is handed a real `Configuration` object (from `toolguard.config`, the `config` layer) through a `config` parameter, and calls four of its methods to build the cascade. **The import graph shows no edge to `toolguard.config` here at all** -- the coupling exists only in what the object handed through that parameter is expected to support.
+`permission_resolution.py`'s own module docstring states it "never imports `toolguard.configuration.config` or `toolguard.engine.resolve`" -- and that is true; its only toolguard imports are `config_types`, `permissions`, and `file_matching`. But at runtime, every call to `resolve_command_permission` or `resolve_file_path_permission` is handed a real `Configuration` object (from `toolguard.configuration.config`, the `config` layer) through a `config` parameter, and calls four of its methods to build the cascade. **The import graph shows no edge to `toolguard.configuration.config` here at all** -- the coupling exists only in what the object handed through that parameter is expected to support.
 
 <img src="diagrams/protocol-seam.png" alt="The coupling no import graph shows" width="50%">
 
@@ -393,7 +464,7 @@ None of the four has a production caller. `resolve.py` drives `decompose`, `judg
 
 The gap is closed as far as static typing can close it. Not as far as an import graph can.
 
-Four `Protocol` classes in `config_types.py` -- `ResolutionConfig`, `ResolveConfig`, `PathAnchoring`, `FilePathResolutionConfig` -- declare structurally the subset of `Configuration` each caller actually needs. Pyright checks them. None of them adds an import edge to `toolguard.config`.
+Four `Protocol` classes in `config_types.py` -- `ResolutionConfig`, `ResolveConfig`, `PathAnchoring`, `FilePathResolutionConfig` -- declare structurally the subset of `Configuration` each caller actually needs. Pyright checks them. None of them adds an import edge to `toolguard.configuration.config`.
 
 | module | types against | declared members |
 |---|---|---|
@@ -416,7 +487,7 @@ Item 03 converted that invisible *runtime* edge into an ordinary *import* edge. 
 
 What remains is narrower, not gone. `resolve.py` imports from `permission_resolution.py`: one direction, a real import. The orchestration now flows through one import edge plus one duck-typed `config` parameter. The module's own docstring says so:
 
-> at runtime this module and `toolguard.file_matching` still call a real `Configuration`'s methods through the Protocol-typed `config` parameter... a real coupling the import graph does not show, and nothing would flag a future `Configuration` method calling back into this module.
+> at runtime this module and `toolguard.engine.file_matching` still call a real `Configuration`'s methods through the Protocol-typed `config` parameter... a real coupling the import graph does not show, and nothing would flag a future `Configuration` method calling back into this module.
 
 **The magnitude of the original problem**, measured on a 6,401-case replay before the fix existed and recorded in the branch-side dependency report:
 
@@ -498,7 +569,7 @@ Two of the three exist because valid output is not the same as correct output. A
 
 The rule-loss check is opt-in. A caller passing `expected_patterns=None` skips it, which is right for a brand-new file and is the thing to look at anywhere else.
 
-**"The hook never writes configuration" is not quite true.** `permission_migration.py` is core, not tooling, and the hook can trigger a migration on the live path when `auto_migrate` is enabled -- at most once per calendar day per project. Section 4 has the rest.
+**"The hook never writes configuration" is now simply true**, and was not until TOO-78. `permission_migration.py` is core rather than tooling, and the hook could trigger a migration on the live path when `auto_migrate` was enabled. That call runs from `session_start` instead (Section 4 has the reasoning), and every remaining caller of the guarded write is operator tooling or the migration it drives.
 
 Nothing enforces the chokepoint -- not `--layers`, not anything else.
 
@@ -550,10 +621,10 @@ Two streams are read back. `toolguard-session-start` surfaces the conflict log a
 
 ## Sources
 
-For sections 1-4: `pyproject.toml`, `toolguard/hook.py`, `toolguard/once_per.py`, `toolguard/auto_migrate.py`, `toolguard/config_write_guard.py`, `toolguard/parser/bash_parser.peg`, `toolguard/parser/multiline.py`, `toolguard/tools/mining.py`, `.claude/rules/bash-grammar.md`, `technical-notes.md` ("Grammar-first, with a light AST"), and `toolguard-memories/TOO-45/proposed-tickets/00-INDEX.md` for the sweep's defect tally.
+For sections 1-4: `pyproject.toml`, `toolguard/hook.py`, `toolguard/foundation/once_per.py`, `toolguard/configuration/auto_migrate.py`, `toolguard/configuration/config_write_guard.py`, `toolguard/parser/bash_parser.peg`, `toolguard/parser/multiline.py`, `toolguard/tools/mining.py`, `.claude/rules/bash-grammar.md`, `technical-notes.md` ("Grammar-first, with a light AST"), and `toolguard-memories/TOO-45/proposed-tickets/00-INDEX.md` for the sweep's defect tally.
 
-For section 5: `toolguard/claude_code_contract.py`, `toolguard/hook.py` (`create_hook_output`), `toolguard/tool_spec.py`, `toolguard/constants.py`, `.pyscn.toml`, `.claude/rules/native-fidelity-claims.md`, `toolguard-memories/TOO-45/DECISIONS-PENDING.md` (decision A16), `toolguard-memories/TOO-45/proposed-tickets/85-consolidate-the-external-contract-into-one-module.md`, and the basic-memory implementation reports for ticket 85's chunks A-C.
+For section 5: `toolguard/integration/claude_code_contract.py`, `toolguard/hook.py` (`create_hook_output`), `toolguard/foundation/tool_spec.py`, `toolguard/foundation/constants.py`, `.pyscn.toml`, `.claude/rules/native-fidelity-claims.md`, `toolguard-memories/TOO-45/DECISIONS-PENDING.md` (decision A16), `toolguard-memories/TOO-45/proposed-tickets/85-consolidate-the-external-contract-into-one-module.md`, and the basic-memory implementation reports for ticket 85's chunks A-C.
 
-For sections 10-13: `toolguard/config.py` (`_discover_levels`, `permission_levels_with_provenance`), `toolguard/patterns.py`, `toolguard/permissions.py` (`match_command`), `toolguard/file_matching.py`, `toolguard/config_write_guard.py`, `toolguard/rule_sort.py`, `toolguard/log_writer.py`, `toolguard/error_log.py`, `toolguard/session_start.py`. This material was merged in from the former `docs/architecture.md`, which this document replaces.
+For sections 10-13: `toolguard/configuration/config.py` (`_discover_levels`, `permission_levels_with_provenance`), `toolguard/foundation/patterns.py`, `toolguard/engine/permissions.py` (`match_command`), `toolguard/engine/file_matching.py`, `toolguard/configuration/config_write_guard.py`, `toolguard/configuration/rule_sort.py`, `toolguard/observability/log_writer.py`, `toolguard/observability/error_log.py`, `toolguard/session_start.py`. This material was merged in from the former `docs/architecture.md`, which this document replaces.
 
-Primary: `toolguard/config_types.py`, `toolguard/resolve.py`, `toolguard/permission_resolution.py`, `toolguard/permissions.py`, `toolguard/file_matching.py`, `toolguard/compound.py`, `toolguard/api.py`, `toolguard/hook.py`, `.pyscn.toml`, `tools/architecture_fitness.py`, `test/unit/test_architecture_fitness.py`. Behavioural claims about hard deny and strictest-wins were re-checked by running them through `toolguard/testing/sandbox.py`'s `experiment()`. Secondary, for historical numbers and rationale that predate the current tree: `toolguard-memories/TOO-45/reports/dependencies-before-after.md`, `core-types-and-clarity.md`, `layer-separation-before-after.md`; `technical-notes.md`; git log for TOO-45 item commits (03, 05, 10).
+Primary: `toolguard/decision_model/vocabulary.py`, `toolguard/engine/resolve.py`, `toolguard/engine/permission_resolution.py`, `toolguard/engine/permissions.py`, `toolguard/engine/file_matching.py`, `toolguard/engine/compound.py`, `toolguard/api.py`, `toolguard/hook.py`, `.pyscn.toml`, `tools/architecture_fitness.py`, `test/unit/test_architecture_fitness.py`. Behavioural claims about hard deny and strictest-wins were re-checked by running them through `toolguard/testing/sandbox.py`'s `experiment()`. Secondary, for historical numbers and rationale that predate the current tree: `toolguard-memories/TOO-45/reports/dependencies-before-after.md`, `core-types-and-clarity.md`, `layer-separation-before-after.md`; `technical-notes.md`; git log for TOO-45 item commits (03, 05, 10).

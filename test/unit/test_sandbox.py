@@ -18,10 +18,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import toolguard.config as toolguard_config
+import toolguard.configuration.config as toolguard_config
 from toolguard.api import decide
-from toolguard.file_matching import check_file_path_hard_deny
-from toolguard.invocation import Invocation
+from toolguard.engine.file_matching import check_file_path_hard_deny
+from toolguard.foundation.invocation import Invocation
 from toolguard.testing.sandbox import (
     SCRUBBED_ENV_VARS,
     SandboxEscapeError,
@@ -220,7 +220,8 @@ class TestSandboxUnderAHostileEnvironment(unittest.TestCase):
         with (
             mock.patch.object(Path, "home", return_value=self.hostile_home),
             mock.patch(
-                "toolguard.config.find_project_root", return_value=self.bare_project
+                "toolguard.configuration.config.find_project_root",
+                return_value=self.bare_project,
             ),
             mock.patch.dict(os.environ, self.hostile_env, clear=True),
         ):

@@ -1,4 +1,4 @@
-"""Unit tests for toolguard.auto_mode_trace: the auto-mode trace writer."""
+"""Unit tests for toolguard.observability.auto_mode_trace: the auto-mode trace writer."""
 
 import json
 import unittest
@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard.auto_mode_trace import (
+from toolguard.observability.auto_mode_trace import (
     AutoModeTraceEntry,
     FALLBACK_CAUSE_NO_MATCH,
     log_auto_mode_trace,

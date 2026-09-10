@@ -17,8 +17,8 @@ survive byte for byte.
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from toolguard.config import Configuration
-from toolguard.rule_sort import (
+from toolguard.configuration.config import Configuration
+from toolguard.configuration.rule_sort import (
     find_section_boundaries,
     parse_permissions_section_with_comments,
     subsection_line_range,

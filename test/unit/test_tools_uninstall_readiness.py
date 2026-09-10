@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 from unittest.mock import patch
 
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.uninstall_readiness import (
     evaluate_uninstall_readiness_permissions,
     missing_uninstall_readiness_permissions,

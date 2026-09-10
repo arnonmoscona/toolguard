@@ -1,5 +1,5 @@
 """
-Unit tests for :mod:`toolguard.permission_resolution`.
+Unit tests for :mod:`toolguard.engine.permission_resolution`.
 
 Owns the TOO-19 parse-failure ASK floor and its interaction with the
 more-specific-wins cascade. Plain cascade coverage (child-beats-parent,
@@ -13,15 +13,15 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
-from toolguard.config import Configuration, ConfigLayer, Provenance
-from toolguard.config import _FALLBACK_SETTINGS
-from toolguard.invocation import Invocation
-from toolguard.permission_resolution import (
+from toolguard.configuration.config import Configuration, ConfigLayer, Provenance
+from toolguard.configuration.config import _FALLBACK_SETTINGS
+from toolguard.foundation.invocation import Invocation
+from toolguard.engine.permission_resolution import (
     apply_parse_failure_floor,
     resolve_command_permission,
     resolve_file_path_permission,
 )
-from toolguard.resolve import resolve_bash_permission_detailed
+from toolguard.engine.resolve import resolve_bash_permission_detailed
 
 _PROJECT_PATH = Path("/p/.claude/toolguard_hook.toml")
 _USER_PATH = Path("/h/.claude/toolguard_hook.toml")
@@ -348,7 +348,7 @@ class TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting(unittest.TestC
     """
     The parse-failure ASK floor must hold for every
     fallback-shaped setting, not just today's two. Iterates
-    ``toolguard.config._FALLBACK_SETTINGS`` -- the single declared registry also read by
+    ``toolguard.configuration.config._FALLBACK_SETTINGS`` -- the single declared registry also read by
     ``Configuration.unrecognized_fallback_settings`` -- instead of naming settings by
     hand, so a future setting added to that registry is automatically covered here too:
     adding a setting to the registry is what makes it visible to the diagnostic, and the
@@ -952,7 +952,7 @@ class TestHardDenyRegressionGuards(unittest.TestCase):
 class TestAutoModeBehaviorUnderParseFailure(unittest.TestCase):
     """
     The parse-failure ASK floor sits above rule matching
-    (:func:`~toolguard.permission_resolution._apply_ask_floor`) and is unconditional --
+    (:func:`~toolguard.engine.permission_resolution._apply_ask_floor`) and is unconditional --
     a per-rule ``auto_mode_behavior`` cannot escape it, the same as no other
     fallback-shaped setting can (see
     ``test.unit.test_permission_resolution.TestParseFailureFloorHoldsForEveryRegisteredFallbackSetting``,

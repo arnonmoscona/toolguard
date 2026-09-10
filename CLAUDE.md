@@ -260,6 +260,12 @@ Installed here. Generic guidance: `~/.claude/reference/search.md` and
 * `uv run python tools/architecture_fitness.py --layers` -- completeness and direction against
   the map in `.pyscn.toml`. Completeness is strong: every module must have an entry. Direction
   is weaker than it looks, because the map is both the specification and the thing satisfied.
+  It also checks the `[architecture.dag]` table: the declared layer graph must be **acyclic**,
+  and `[[architecture.rules]]` must equal its transitive closure. Acyclicity is the hard gate --
+  the one thing here a human cannot satisfy by editing the specification to match the code.
+* `uv run python tools/architecture_fitness.py --privates` -- fails on a cross-module import of
+  a private name. Strong for the same reason as completeness: it checks a declared rule, not a
+  judgement. Either the import should not exist, or the name should not be underscored.
 * **Then ask the what-vs-how question out loud, because no check can answer it.** For each new
   or changed class and function: is this about *what to do* or *how to do it*, and is it stable
   under ongoing maintenance or too thin to survive a change underneath it? A facade of thin
@@ -298,12 +304,6 @@ Installed here. Generic guidance: `~/.claude/reference/search.md` and
   ever a local path again, `upgrade` silently does the wrong thing: check `uv tool list` first.
   The SessionStart check now also raises staleness by itself when the tree is clean and differs
   from the installed copy, so this no longer depends solely on remembering.
-* **Decide whether the `<TEMPORARY>` fence in `.claude/toolguard_hook.toml` still earns its
-  place.** It holds the TOO-45 refactoring-loop guards -- denies that stop the loop writing to
-  settings and memory. TOO-45 has shipped, so the loop they guarded is over, but they are
-  protective and removing them is a judgement rather than a cleanup. Keep or drop, then delete
-  the fence either way: a marker that outlives its reason is the failure this project measured
-  at 9 of 9.
 
 ## Technical notes
 

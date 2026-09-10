@@ -154,7 +154,9 @@ strict_mode = true
 #
 # Layer order (each layer may import ONLY from itself and layers BELOW it):
 #
-#   foundation  <-  observability  <-  config  <-  engine  <-  api  <-  runtime  <-  tooling  <-  support
+#   Superseded by [architecture.dag] below, which is the source of truth and is
+#   not a single chain: `install` and `model` branch off `foundation`, and
+#   `engine` reaches `model` without reaching `configuration` (TOO-78).
 #
 # EVERY module must appear in exactly one layer. An unlisted module is silently
 # unmapped and its dependencies stop being validated, so the map degrades quietly
@@ -168,9 +170,32 @@ strict_mode = true
 # an upward import) without either caller reaching into the other's layer.
 
 [[architecture.layers]]
+name = "integration"
+# The Claude Code wire contract (TOO-78). A SINK: it imports nothing from
+# toolguard and describes an external format, so every layer may depend on it
+# and it depends on none. This is ticket 85's shape -- "does this module touch
+# the external contract?" is now an import edge.
+packages = ["integration"]
+
+[[architecture.layers]]
 name = "foundation"
-# Leaves: no toolguard imports at all, or only other foundation modules.
-packages = ["ambient", "claude_code_contract", "constants", "issues", "path_utils", "normalization", "patterns", "toml_scan", "_git", "install_provenance", "install_update", "file_lock", "tool_spec", "invocation"]
+# Leaves: no toolguard imports beyond other foundation modules and the contract.
+packages = ["foundation"]
+
+[[architecture.layers]]
+name = "decision_model"
+# The permission vocabulary a decision is made in (TOO-78): rule entries,
+# verdicts, level matches, provenance, and the context protocols the engine
+# resolves against. Below both `configuration` and `engine` so they can share
+# it without `engine` gaining an edge into `configuration`.
+packages = ["decision_model"]
+
+[[architecture.layers]]
+name = "install"
+# Installation support (TOO-78). Its own layer rather than foundation noise:
+# nothing but an install process has business reading provenance or update
+# state, and only a restricted set of in-edges makes that enforceable.
+packages = ["install"]
 
 [[architecture.layers]]
 name = "observability"
@@ -199,17 +224,21 @@ name = "observability"
 # imports only error_log, same-layer -- log_writer.resolve_log_dir is called
 # by hook.py (runtime layer), which passes the resolved Path in, not by
 # error_reporter itself (TOO-45 punch-list #04 follow-up: Reporter).
-packages = ["log_writer", "error_log", "session_warnings", "update_check", "once_per_store", "once_per", "error_reporter", "auto_mode_trace"]
+#
+# TOO-78 moved once_per/once_per_store OUT to foundation: measured, they import
+# only ambient and stdlib and nothing observability, so they are the throttle
+# primitive these services USE rather than services themselves.
+packages = ["observability"]
 
 [[architecture.layers]]
-name = "config"
+name = "configuration"
 # Owns the configuration model, discovery, validation, and the write path.
-packages = ["rule_entry", "config_types", "config", "config_validation", "config_write_guard", "env_config", "rule_sort", "auto_migrate", "config_divergence", "permission_migration"]
+packages = ["configuration"]
 
 [[architecture.layers]]
 name = "engine"
 # Pure decision logic: pattern matching, command decomposition, resolution.
-packages = ["permissions", "compound", "resolve", "parser", "permission_resolution", "file_matching"]
+packages = ["engine", "parser"]
 
 [[architecture.layers]]
 name = "api"
@@ -234,48 +263,104 @@ name = "support"
 # Test/experiment support. May reach anywhere; nothing may depend on it.
 packages = ["testing"]
 
+# The source of truth for legitimate dependencies (TOO-78). It states what a
+# layer MAY import, not what it happens to import today.
+#
+# Edges are TRANSITIVE: `A -> B` and `B -> C` grants A the whole of C's subtree,
+# so only the MINIMAL edges are declared and `--layers` computes the closure.
+# That is why there are nine edges here rather than forty, and why each one is
+# a real architectural statement rather than bookkeeping.
+#
+# The cost of transitivity, worth knowing before adding an edge: a single new
+# edge grants everything below its target at once. `configuration = ["runtime"]`
+# would hand configuration `install` and `api` in the same stroke. `--layers`
+# prints the computed closure so that widening is visible where it happens.
+#
+# It cannot express "A may reach D but not C" when C is on the path to D. That
+# restriction is not wanted today; if it ever is, edges will need to carry a
+# transitive/non-transitive tag rather than the graph being expanded by hand.
+#
+# `[[architecture.rules]]` below is this table's expansion, kept because pyscn
+# reads it. `--layers` asserts the two agree, so neither can drift.
+#
+# ACYCLICITY IS THE HARD GATE. A dependency loop costs the ability to reason
+# about the code and admits a family of import-order bugs.
+# `engine` reaches `model`, NOT `configuration` (TOO-78). The decision machinery
+# shares a type vocabulary with the configuration layer without being able to
+# load, discover or validate configuration -- so a stray
+# `from toolguard.configuration.config import load_configuration` inside engine/
+# is a direction violation rather than a legal import nobody notices.
+[architecture.dag]
+integration   = []
+foundation    = ["integration"]
+decision_model = ["foundation"]
+install       = ["foundation"]
+observability = ["foundation"]
+configuration = ["decision_model", "observability"]
+engine        = ["decision_model"]
+api           = ["engine", "configuration"]
+runtime       = ["api", "install"]
+tooling       = ["runtime"]
+support       = ["tooling"]
+
+
+# EXPANDED FROM [architecture.dag] ABOVE -- pyscn reads this form, `--layers`
+# asserts it equals the closure plus each layer's self edge, so the two cannot
+# drift. Edit the DAG, not this; `--layers` will name any disagreement.
+
+[[architecture.rules]]
+from = "integration"
+allow = ["integration"]
+deny = ["foundation", "decision_model", "install", "observability", "configuration", "engine", "api", "runtime", "tooling", "support"]
+
 [[architecture.rules]]
 from = "foundation"
-allow = ["foundation"]
-deny = ["observability", "config", "engine", "api", "runtime", "tooling", "support"]
+allow = ["foundation", "integration"]
+deny = ["decision_model", "install", "observability", "configuration", "engine", "api", "runtime", "tooling", "support"]
 
-# "observability" sits directly above "foundation" and BELOW "config" (TOO-45).
-# That placement is the whole point: config-layer code must be able to log and
-# warn through the real modules instead of hand-rolling stderr writes, which is
-# what the old placement forced in four config modules.
+[[architecture.rules]]
+from = "decision_model"
+allow = ["decision_model", "foundation", "integration"]
+deny = ["install", "observability", "configuration", "engine", "api", "runtime", "tooling", "support"]
+
+[[architecture.rules]]
+from = "install"
+allow = ["install", "foundation", "integration"]
+deny = ["decision_model", "observability", "configuration", "engine", "api", "runtime", "tooling", "support"]
+
 [[architecture.rules]]
 from = "observability"
-allow = ["observability", "foundation"]
-deny = ["config", "engine", "api", "runtime", "tooling", "support"]
+allow = ["observability", "foundation", "integration"]
+deny = ["decision_model", "install", "configuration", "engine", "api", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
-from = "config"
-allow = ["config", "observability", "foundation"]
-deny = ["engine", "api", "runtime", "tooling", "support"]
+from = "configuration"
+allow = ["configuration", "decision_model", "observability", "foundation", "integration"]
+deny = ["install", "engine", "api", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
 from = "engine"
-allow = ["engine", "config", "observability", "foundation"]
-deny = ["api", "runtime", "tooling", "support"]
+allow = ["engine", "decision_model", "foundation", "integration"]
+deny = ["install", "observability", "configuration", "api", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
 from = "api"
-allow = ["api", "engine", "config", "observability", "foundation"]
-deny = ["runtime", "tooling", "support"]
+allow = ["api", "engine", "configuration", "decision_model", "observability", "foundation", "integration"]
+deny = ["install", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
 from = "runtime"
-allow = ["runtime", "api", "engine", "config", "observability", "foundation"]
+allow = ["runtime", "api", "engine", "configuration", "decision_model", "observability", "foundation", "integration", "install"]
 deny = ["tooling", "support"]
 
 [[architecture.rules]]
 from = "tooling"
-allow = ["tooling", "runtime", "api", "engine", "config", "observability", "foundation"]
+allow = ["tooling", "runtime", "api", "engine", "configuration", "decision_model", "observability", "foundation", "integration", "install"]
 deny = ["support"]
 
 [[architecture.rules]]
 from = "support"
-allow = ["support", "tooling", "runtime", "api", "engine", "config", "observability", "foundation"]
+allow = ["support", "tooling", "runtime", "api", "engine", "configuration", "decision_model", "observability", "foundation", "integration", "install"]
 
 
 # =============================================================================

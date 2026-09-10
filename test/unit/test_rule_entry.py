@@ -1,5 +1,5 @@
 """
-Unit tests for :mod:`toolguard.rule_entry`. Every :class:`~toolguard.rule_entry.RuleEntry`
+Unit tests for :mod:`toolguard.decision_model.rule_entry`. Every :class:`~toolguard.decision_model.rule_entry.RuleEntry`
 here is built directly from hand-constructed values with zero file I/O, so per
 ``.claude/rules/test-config-isolation.md``'s checklist, no ``ConfigIsolationMixin`` is
 needed for this file.
@@ -9,15 +9,15 @@ import dataclasses
 import unittest
 from types import MappingProxyType
 
-from toolguard.constants import (
+from toolguard.foundation.constants import (
     DECISION_ALLOW,
     DECISION_ASK,
     DECISION_DENY,
     PROGRAM_SOURCE_FILE,
     PROGRAM_SOURCE_NOT_FILE,
 )
-from toolguard.issues import Issue
-from toolguard.rule_entry import (
+from toolguard.foundation.issues import Issue
+from toolguard.decision_model.rule_entry import (
     ADDITIONAL_CONTEXT_KEY,
     AUTO_MODE_BEHAVIOR_KEY,
     PROGRAM_SOURCE_KEY,

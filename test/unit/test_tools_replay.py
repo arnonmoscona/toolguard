@@ -9,12 +9,12 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from toolguard.api import decide
-from toolguard.config import (
+from toolguard.configuration.config import (
     ConfigLayer,
     Configuration,
     Provenance,
 )
-from toolguard.config_types import RuntimeVerdict
+from toolguard.decision_model.vocabulary import RuntimeVerdict
 from toolguard.tools import replay as replay_module
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.replay import classify_change, replay, replay_single

@@ -51,7 +51,7 @@ Generated code
 
 ``--ambient``
     Report reads of home, the working directory or the environment under
-    ``toolguard/`` that bypass ``toolguard.ambient`` with no owner entry, plus
+    ``toolguard/`` that bypass ``toolguard.foundation.ambient`` with no owner entry, plus
     ``not checked`` counts for the reads this scan cannot see. ``os`` may be
     imported only by the modules in :data:`OS_IMPORT_OWNERS`, and a ``pathlib``
     ambient member only where :data:`PATH_AMBIENT_OWNERS` has an entry for that
@@ -320,6 +320,10 @@ class ArchitectureConfig:
 
     layers: Tuple[LayerDef, ...]
     rules: Tuple[LayerRule, ...]
+    #: ``[architecture.dag]``: the minimal, TRANSITIVE edge set. ``A -> B -> C``
+    #: means A may import C, so a downward edge implied by a longer path is not
+    #: declared. The source of truth; ``rules`` is its expansion for pyscn.
+    dag: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
     def package_to_layer(self) -> Dict[str, str]:
         """Return a ``{first-path-segment: layer name}`` map built from ``layers``."""
@@ -350,7 +354,73 @@ def parse_architecture_config(pyscn_toml_path: Path = PYSCN_TOML) -> Architectur
         LayerRule(from_layer=entry["from"], allow=tuple(entry.get("allow", [])))
         for entry in arch.get("rules", [])
     )
-    return ArchitectureConfig(layers=layers, rules=rules)
+    dag = {layer: tuple(targets) for layer, targets in arch.get("dag", {}).items()}
+    return ArchitectureConfig(layers=layers, rules=rules, dag=dag)
+
+
+def dag_closure(dag: Dict[str, Tuple[str, ...]]) -> Dict[str, FrozenSet[str]]:
+    """
+    Return every layer each layer may reach, following edges transitively.
+
+    Declaring ``A -> B`` and ``B -> C`` grants A the whole of C's subtree, so
+    the closure -- not the declaration -- is what actually governs. Printing it
+    is how a newly added edge shows what it granted.
+
+    A cycle would make this unbounded, so a node already being expanded
+    contributes nothing further; check :func:`dag_cycles` first and treat a
+    non-empty result as fatal rather than reading a closure computed over one.
+    """
+    closure: Dict[str, FrozenSet[str]] = {}
+    expanding: Set[str] = set()
+
+    def reach(layer: str) -> FrozenSet[str]:
+        if layer in closure:
+            return closure[layer]
+        if layer in expanding:
+            return frozenset()
+        expanding.add(layer)
+        found: Set[str] = set()
+        for target in dag.get(layer, ()):
+            found.add(target)
+            found |= reach(target)
+        expanding.discard(layer)
+        closure[layer] = frozenset(found)
+        return closure[layer]
+
+    for layer in dag:
+        reach(layer)
+    return closure
+
+
+def dag_cycles(dag: Dict[str, Tuple[str, ...]]) -> List[List[str]]:
+    """
+    Return every cycle in *dag*, each as the looping list of layer names.
+
+    The one hard gate on the layer declaration. A dependency loop costs the
+    ability to reason about the code and admits a family of import-order bugs;
+    everything else the layer map checks is bookkeeping next to it.
+    """
+    cycles: List[List[str]] = []
+    path: List[str] = []
+    on_path: Set[str] = set()
+    done: Set[str] = set()
+
+    def walk(layer: str) -> None:
+        path.append(layer)
+        on_path.add(layer)
+        for target in dag.get(layer, ()):
+            if target in on_path:
+                cycles.append(path[path.index(target) :] + [target])
+            elif target not in done:
+                walk(target)
+        on_path.discard(layer)
+        path.pop()
+        done.add(layer)
+
+    for layer in sorted(dag):
+        if layer not in done:
+            walk(layer)
+    return cycles
 
 
 # =============================================================================
@@ -372,16 +442,29 @@ class LayerReport:
     #: Modules actually mapped or unmapped; zero means the tree was never
     #: examined, which must not read as a clean pass.
     examined_modules: int = 0
+    #: Cycles in the declared ``[architecture.dag]``. The hard gate: a loop
+    #: makes the closure meaningless and the code unreasonable-about.
+    dag_cycles: List[List[str]] = field(default_factory=list)
+    #: Layers whose ``[[architecture.rules]]`` allow-list disagrees with the
+    #: DAG closure, as ``{layer: (missing_from_rules, extra_in_rules)}``.
+    dag_disagreements: Dict[str, Tuple[List[str], List[str]]] = field(
+        default_factory=dict
+    )
+    #: What each layer may reach, transitively. Printed so that adding one
+    #: edge shows everything it granted.
+    closure: Dict[str, FrozenSet[str]] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
-        """True when something was examined and there is no completeness, dead-package, or direction problem."""
+        """True when something was examined and no check found a problem."""
         return (
             self.examined_modules > 0
             and not self.unmapped
             and not self.multiply_mapped
             and not self.violations
             and not self.dead_packages
+            and not self.dag_cycles
+            and not self.dag_disagreements
         )
 
 
@@ -442,7 +525,31 @@ def check_layers(
                         "local_import": edge.is_local,
                     }
                 )
+    _check_declared_dag(arch, report)
     return report
+
+
+def _check_declared_dag(arch: ArchitectureConfig, report: LayerReport) -> None:
+    """
+    Validate ``[architecture.dag]``: acyclic, and agreeing with ``rules``.
+
+    Fills *report* in place. Skipped entirely when no DAG is declared, so a
+    configuration predating it still reports on completeness and direction.
+    """
+    if not arch.dag:
+        return
+    report.dag_cycles = dag_cycles(arch.dag)
+    if report.dag_cycles:
+        return  # a closure computed over a cycle would be nonsense
+    report.closure = dag_closure(arch.dag)
+    for layer, reachable_layers in sorted(report.closure.items()):
+        expected = reachable_layers | {layer}
+        declared = set(arch.allow_for(layer))
+        if declared != expected:
+            report.dag_disagreements[layer] = (
+                sorted(expected - declared),
+                sorted(declared - expected),
+            )
 
 
 def render_layers_text(report: LayerReport) -> str:
@@ -483,6 +590,40 @@ def render_layers_text(report: LayerReport) -> str:
             )
     else:
         lines.append("No cross-layer direction violations.")
+
+    lines.append("")
+    lines.append("=== --layers: declared DAG ===")
+    if report.dag_cycles:
+        lines.append(
+            f"CYCLES ({len(report.dag_cycles)}) -- the layer graph is not a DAG:"
+        )
+        for cycle in report.dag_cycles:
+            lines.append(f"  - {' -> '.join(cycle)}")
+        return "\n".join(lines)
+    if not report.closure:
+        lines.append("No [architecture.dag] declared -- nothing to validate.")
+        return "\n".join(lines)
+    lines.append("Acyclic.")
+    if report.dag_disagreements:
+        lines.append(
+            f"DISAGREEMENT ({len(report.dag_disagreements)}) -- "
+            "[[architecture.rules]] does not match the DAG closure:"
+        )
+        for layer, (missing, extra) in sorted(report.dag_disagreements.items()):
+            detail = []
+            if missing:
+                detail.append(f"missing {', '.join(missing)}")
+            if extra:
+                detail.append(f"extra {', '.join(extra)}")
+            lines.append(f"  - {layer}: {'; '.join(detail)}")
+    else:
+        lines.append("[[architecture.rules]] agrees with the closure.")
+
+    lines.append("")
+    lines.append("Closure -- what each layer may reach, transitively:")
+    for layer in sorted(report.closure):
+        reachable_layers = sorted(report.closure[layer])
+        lines.append(f"  {layer} -> {', '.join(reachable_layers) or '(nothing)'}")
     return "\n".join(lines)
 
 
@@ -1876,7 +2017,7 @@ def find_import_cycles(
 #: version drifted: it named four modules from the pre-TOO-45 architecture and
 #: could not see anything added since -- including modules squarely in "the
 #: engine" or "the config model" by any reading of R6's own title.
-R6_GUARDED_LAYERS = ("config", "engine")
+R6_GUARDED_LAYERS = ("configuration", "engine", "decision_model")
 
 #: R6's REACH-FROM side: where a private reach into :data:`R6_GUARDED_LAYERS`
 #: counts as a violation.
@@ -2099,11 +2240,11 @@ def _bind_module_aliases(
     """
     Return ``{local_name: toolguard-relative module path}`` for every
     WHOLE-MODULE import binding anywhere in *tree* -- ``import
-    toolguard.config``, ``import toolguard.config as cfg``, ``from toolguard
+    toolguard.configuration.config``, ``import toolguard.configuration.config as cfg``, ``from toolguard
     import config``, ``from toolguard import config as cfg`` -- so a later
     attribute/``getattr`` access can be traced back to the module it targets.
 
-    Does NOT track a from-import of a specific NAME (``from toolguard.config
+    Does NOT track a from-import of a specific NAME (``from toolguard.configuration.config
     import load_configuration``) -- that binds a name to a VALUE, not a module;
     :func:`scan_private_reaches` handles that case on its own.
 
@@ -2124,7 +2265,7 @@ def _bind_module_aliases(
                     if target is not None:
                         aliases[alias.asname] = target
                 else:
-                    # Bare `import toolguard.config` binds only `toolguard`;
+                    # Bare `import toolguard.configuration.config` binds only `toolguard`;
                     # `_resolve_expr_to_module` walks the rest of the chain.
                     first = alias.name.split(".")[0]
                     target = resolve_toolguard_import(first, 0, importer_rel)
@@ -3151,7 +3292,7 @@ def _project_dependencies(pyproject_text: str) -> List[str]:
 # ordinary work, because a false deny reads as "deny" here too.
 
 #: File-path tools use "file_path" in tool_input; everything else uses "command".
-#: Deliberately NOT imported from toolguard.tool_spec: this canary exists to
+#: Deliberately NOT imported from toolguard.foundation.tool_spec: this canary exists to
 #: detect drift between the installed hook and this repo, and a check that
 #: derives the fact it verifies from the thing it verifies can only agree with
 #: itself.
@@ -4001,15 +4142,15 @@ AMBIENT_UNSEEN_MODULE_ALIAS = (
 )
 
 #: Module (toolguard-relative dotted) -> why it may import ``os``. Every other
-#: module reaches the environment through :mod:`toolguard.ambient`, which makes
+#: module reaches the environment through :mod:`toolguard.foundation.ambient`, which makes
 #: ``os.environ``, ``os.getcwd``, ``os.getenv`` and ``os.path.expanduser``
 #: unreachable elsewhere rather than merely undetected.
 OS_IMPORT_OWNERS: Dict[str, str] = {
-    "ambient": "the facade: os.environ is the environment fact it reports",
-    "config_write_guard": "atomic write: os.fdopen, os.fsync, os.replace",
-    "file_lock": "advisory locking: os.open, os.lseek, os.close and the O_/SEEK_ flags",
-    "install_provenance": "os.pathsep to split PYTHONPATH",
-    "log_writer": "os.SEEK_END for the tail read",
+    "foundation.ambient": "the facade: os.environ is the environment fact it reports",
+    "configuration.config_write_guard": "atomic write: os.fdopen, os.fsync, os.replace",
+    "foundation.file_lock": "advisory locking: os.open, os.lseek, os.close and the O_/SEEK_ flags",
+    "install.install_provenance": "os.pathsep to split PYTHONPATH",
+    "observability.log_writer": "os.SEEK_END for the tail read",
     "testing.sandbox": "builds a child process environment and guards real writes",
     "tools.decision_ledger": "atomic write: os.fdopen, os.fsync, os.replace",
     "tools.installer": "os.access and os.X_OK to test an executable",
@@ -4017,30 +4158,33 @@ OS_IMPORT_OWNERS: Dict[str, str] = {
 
 #: (module, ``Path`` member) -> why that module may read the fact directly.
 PATH_AMBIENT_OWNERS: Dict[Tuple[str, str], str] = {
-    ("ambient", "cwd"): "the facade",
-    ("ambient", "home"): "the facade",
-    ("path_utils", "expanduser"): "pathlib's own expanduser, for the ~user form",
-    ("config", "resolve"): "compares discovered config directories",
+    ("foundation.ambient", "cwd"): "the facade",
+    ("foundation.ambient", "home"): "the facade",
+    (
+        "foundation.path_utils",
+        "expanduser",
+    ): "pathlib's own expanduser, for the ~user form",
+    ("configuration.config", "resolve"): "compares discovered config directories",
     (
         "hook",
         "cwd",
     ): "PreToolUseEvent.cwd, a wire field parsed from stdin JSON -- not Path.cwd()",
     (
-        "auto_mode_trace",
+        "observability.auto_mode_trace",
         "cwd",
     ): "AutoModeTraceEntry.cwd, a plain str field carried from Invocation.cwd -- not Path.cwd()",
     (
-        "install_provenance",
+        "install.install_provenance",
         "resolve",
     ): "install-location paths: __file__, git rev-parse output, a checkout root",
-    ("install_update", "resolve"): "__file__",
+    ("install.install_update", "resolve"): "__file__",
     (
-        "normalization",
+        "foundation.normalization",
         "resolve",
     ): "the home directory's two spellings, and a rule-matching path's",
-    ("path_utils", "resolve"): "anchors against ambient.cwd() first",
+    ("foundation.path_utils", "resolve"): "anchors against ambient.cwd() first",
     (
-        "permission_migration",
+        "configuration.permission_migration",
         "resolve",
     ): "keys a lockfile on the project directory, and scopes a file search to it",
     ("session_start", "resolve"): "compares two package roots",
@@ -4407,6 +4551,82 @@ def render_stdlib_text(findings: Sequence[Tuple[str, int, str]]) -> str:
 
 
 # =============================================================================
+# --privates: cross-module imports of a private name
+# =============================================================================
+
+
+def find_cross_module_private_imports(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+) -> List[Dict[str, object]]:
+    """
+    Return every ``from <other module> import _name`` under *toolguard_dir*.
+
+    A leading underscore declares a name to be its module's own business, so
+    importing one from another module is either a missing public name or a
+    dependency that should not exist. Both are worth deciding deliberately;
+    neither should pass unremarked.
+
+    Wider than :func:`scan_private_reaches`, which asks R6's narrower question
+    about tooling/runtime reaching into the guarded layers. This holds for
+    every module pair, which is what makes it a total check rather than a
+    sample: it compares against a declaration a human made (the underscore)
+    rather than supplying a judgement of its own.
+
+    Attribute reaches (``mod._x``) stay with :func:`scan_private_reaches`;
+    this is the by-name question. Generated files are skipped.
+
+    Returns:
+        One dict per site, with ``file``, ``line``, ``importer``,
+        ``target_module``, ``private_name`` and ``reexport`` (True for the
+        ``_x as _x`` spelling), sorted by file then line.
+    """
+    findings: List[Dict[str, object]] = []
+    for path in iter_source_files(toolguard_dir):
+        importer = relative_module_path(path, toolguard_dir)
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            target = resolve_toolguard_import(node.module, node.level, importer)
+            if target is None or target == importer:
+                continue
+            for alias in node.names:
+                if not _is_private_name(alias.name):
+                    continue
+                findings.append(
+                    {
+                        "file": str(path.relative_to(toolguard_dir.parent)),
+                        "line": node.lineno,
+                        "importer": importer,
+                        "target_module": target,
+                        "private_name": alias.name,
+                        "reexport": alias.asname == alias.name,
+                    }
+                )
+    return sorted(findings, key=lambda f: (f["file"], f["line"], f["private_name"]))
+
+
+def render_privates_text(findings: Sequence[Dict[str, object]]) -> str:
+    """Render :func:`find_cross_module_private_imports` as the ``--privates`` section."""
+    headline = "PASS" if not findings else f"FAIL ({len(findings)} import(s))"
+    lines = [
+        f"=== --privates: {headline} -- cross-module imports of a private name ===",
+    ]
+    if not findings:
+        lines.append("Every name imported across module boundaries is public.")
+        return "\n".join(lines)
+    lines.append(
+        "Each is either a missing public name or a dependency that should not exist."
+    )
+    for finding in findings:
+        suffix = "  [re-export form]" if finding["reexport"] else ""
+        lines.append(
+            f"  - {finding['file']}:{finding['line']} imports "
+            f"{finding['private_name']!r} from {finding['target_module']}{suffix}"
+        )
+    return "\n".join(lines)
+
+
+# =============================================================================
 # --orphans: module-private functions never referenced under toolguard/
 # =============================================================================
 
@@ -4758,7 +4978,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--ambient",
         action="store_true",
-        help="Report unowned reads of home/cwd/environment that bypass toolguard.ambient.",
+        help="Report unowned reads of home/cwd/environment that bypass toolguard.foundation.ambient.",
     )
     parser.add_argument(
         "--stdlib",
@@ -4803,6 +5023,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Machine-readable JSON output instead of text.",
     )
     parser.add_argument(
+        "--privates",
+        action="store_true",
+        help="Report cross-module imports of a leading-underscore name.",
+    )
+    parser.add_argument(
         "--no-lint",
         action="store_true",
         help="With --guard, skip the ruff/check_doc_links.py subprocess checks.",
@@ -4817,6 +5042,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.mocks,
             args.ambient,
             args.stdlib,
+            args.privates,
             args.orphans,
             args.undeclared_types,
             args.guard,
@@ -4825,8 +5051,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ):
         parser.error(
             "at least one of --layers, --predicates, --metrics, --mocks, --ambient, "
-            "--stdlib, --orphans, --undeclared-types, --guard, --guard-canaries-only "
-            "is required"
+            "--stdlib, --privates, --orphans, --undeclared-types, --guard, "
+            "--guard-canaries-only is required"
         )
 
     exit_code = 0
@@ -4853,6 +5079,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(render_stdlib_text(findings))
             print()
         if findings:
+            exit_code = 1
+
+    if args.privates:
+        private_findings = find_cross_module_private_imports()
+        payload["privates"] = {
+            "ok": not private_findings,
+            "findings": private_findings,
+        }
+        if not args.json:
+            print(render_privates_text(private_findings))
+            print()
+        if private_findings:
             exit_code = 1
 
     if args.orphans:

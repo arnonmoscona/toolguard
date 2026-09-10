@@ -9,8 +9,8 @@ import tomllib
 import unittest
 from types import MappingProxyType
 
-from toolguard.rule_entry import RuleEntry
-from toolguard.rule_sort import (
+from toolguard.decision_model.rule_entry import RuleEntry
+from toolguard.configuration.rule_sort import (
     ArrayElement,
     find_multiline_structured_entry_line,
     find_section_boundaries,

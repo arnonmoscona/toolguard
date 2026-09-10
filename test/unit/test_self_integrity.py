@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.self_integrity import (
     SelfIntegrityProtection,
     required_self_integrity_hard_deny_patterns,

@@ -43,7 +43,7 @@ can always tell mechanical certainty from model judgement.
   `settings.json`, or `settings.local.json` as part of this skill. When probing the
   safety floor (Pass 3), this includes never touching the target project: use
   `toolguard --eval` only -- never pipe a synthetic event to the bare `toolguard`
-  hook, which logs and can auto-migrate (a write).
+  hook, which writes the command into the target project's logs.
 - **Never mix the two passes.** Deterministic findings are owned by the tool: do
   not invent them, drop them, or re-rank them. Your own judgement-based findings go
   ONLY in the AI-assisted section, never presented as tool output.
@@ -592,10 +592,10 @@ printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"<PROJECT_
 
 `--eval` loads the target project's hierarchy (project-rooted, ignoring any
 `CLAUDE_SETTINGS_PATH`) and prints a `permissionDecision` on stdout -- **without**
-logging, divergence checks, or auto-migration. It never mutates the project or
-writes to its logs. **Always use `toolguard --eval` for probing; never pipe a
-synthetic event to the bare `toolguard` hook** -- the bare hook logs the command and
-can trigger auto-migration (a config write) on the target project.
+logging or divergence checks. It never mutates the project or writes to its logs.
+**Always use `toolguard --eval` for probing; never pipe a synthetic event to the
+bare `toolguard` hook** -- the bare hook writes the command into the target
+project's audit log, which corrupts the record you are auditing.
 
 Read the verdict from `hookSpecificOutput.permissionDecision` and classify:
 

@@ -38,11 +38,11 @@ import functools
 import traceback
 from pathlib import Path
 
-import toolguard.once_per_store as once_per_store
-from toolguard.once_per_store import ClaimResult, ClaimStatus
+import toolguard.foundation.once_per_store as once_per_store
+from toolguard.foundation.once_per_store import ClaimResult, ClaimStatus
 
 #: The real developer's claim store -- resolved once, before any test
-#: can set toolguard.once_per_store._STORE_PATH's override. Goes through
+#: can set toolguard.foundation.once_per_store._STORE_PATH's override. Goes through
 #: _resolve_store_path() rather than reading _STORE_PATH directly, since
 #: the latter is an override flag (None by default), not the path itself.
 REAL_ONCE_PER_DB = once_per_store._resolve_store_path()
@@ -77,7 +77,7 @@ def _record_leak(func) -> None:
     stack = "".join(traceback.format_stack(limit=10)[:-1])
     _leak_events.append(
         f"{func.__module__}.{func.__qualname__} attempted to use the REAL "
-        f"claim store ({REAL_ONCE_PER_DB}) -- toolguard.once_per_store._STORE_PATH "
+        f"claim store ({REAL_ONCE_PER_DB}) -- toolguard.foundation.once_per_store._STORE_PATH "
         "was not isolated for this test.\n"
         f"Call stack (most recent call last):\n{stack}"
     )

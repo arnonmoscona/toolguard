@@ -143,7 +143,8 @@ entry over letting it silently go stale.
   [auto-mode.md](auto-mode.md), whose opening section covers the distinction first.
 - **Q: My rule with `auto_mode_behavior` matches interactively but not under auto mode. Why?**
   A: Almost certainly a leading environment assignment (`PYTHONPATH=. cmd`, `TG_INTENT=1 cmd`).
-  Prefix handling is per-group: `allow` matches past only known-safe variables, while
+  Prefix handling is per-group: `allow` matches past only the variables named in
+  `assignments_looked_past_when_granting`, which is **empty by default**, while
   `ask`/`deny` match past any. A rule migrating to a different effective group therefore
   covers a slightly different set of commands. Nothing fails open -- the non-matching groups
   are the permission-granting ones. Use a `[regex]` pattern if a rule must cover the same
@@ -263,6 +264,8 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [Why drift detection stays weak on purpose](architecture-as-built.md#why-drift-detection-stays-weak-on-purpose)
 - [6. The layer model](architecture-as-built.md#6-the-layer-model)
   - [Which module sits where](architecture-as-built.md#which-module-sits-where)
+  - [What each package is for](architecture-as-built.md#what-each-package-is-for)
+  - [The module graph](architecture-as-built.md#the-module-graph)
   - [Why `observability` sits below `config`](architecture-as-built.md#why-observability-sits-below-config)
   - [Why `api` exists](architecture-as-built.md#why-api-exists)
   - [What is checked, and what is not](architecture-as-built.md#what-is-checked-and-what-is-not)

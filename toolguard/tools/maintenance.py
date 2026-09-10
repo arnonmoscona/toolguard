@@ -37,10 +37,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from toolguard.config import Configuration, Provenance
-from toolguard.config_write_guard import verified_write_config
-from toolguard.constants import BUILTIN_TOOLS
-from toolguard.rule_sort import (
+from toolguard.configuration.config import Configuration, Provenance
+from toolguard.configuration.config_write_guard import verified_write_config
+from toolguard.foundation.constants import BUILTIN_TOOLS
+from toolguard.configuration.rule_sort import (
     find_section_boundaries,
     is_synthetic_pattern,
     parse_permissions_section_with_comments,
@@ -87,7 +87,7 @@ from toolguard.tools.mining import (
 )
 from toolguard.tools.redundancy import RedundancyFinding, find_redundancy
 from toolguard.tools.replay import EntryDiff, ReplayDiff, replay
-from toolguard.tool_spec import KNOWN_TOOL_NAMES
+from toolguard.foundation.tool_spec import KNOWN_TOOL_NAMES
 
 
 @dataclass(frozen=True)
@@ -162,9 +162,9 @@ def _recognized_tool_names(config: Configuration) -> frozenset:
     """
     Return every tool name ``--tool`` may legitimately name for ``config``.
 
-    :data:`~toolguard.tool_spec.KNOWN_TOOL_NAMES` plus each toolguard layer's
+    :data:`~toolguard.foundation.tool_spec.KNOWN_TOOL_NAMES` plus each toolguard layer's
     ``additional_supported_tools`` -- the same set
-    :meth:`~toolguard.config.Configuration.validation_issues` uses to flag an
+    :meth:`~toolguard.configuration.config.Configuration.validation_issues` uses to flag an
     unsupported tool in the permissions lists themselves.
     """
     additional: set = set()
@@ -187,7 +187,7 @@ def run_maintenance(
     Args:
         config: The resolved configuration to inspect.
         tools: Tool names to inspect.  Defaults to
-            :data:`toolguard.constants.BUILTIN_TOOLS`, sorted -- that constant
+            :data:`toolguard.foundation.constants.BUILTIN_TOOLS`, sorted -- that constant
             is an unordered frozenset and report order is part of the output.
         corpus: Optional harvested command corpus.  When supplied it enables
             corpus-backed redundancy, strict-consolidation replay verification,
@@ -299,7 +299,7 @@ def render(report: MaintenanceReport, fmt: str = "markdown") -> str:
 
 def _provenance_to_dict(provenance: Optional[Provenance]) -> Optional[Dict[str, Any]]:
     """
-    Serialize a :class:`~toolguard.config.Provenance` to a JSON-safe dict.
+    Serialize a :class:`~toolguard.configuration.config.Provenance` to a JSON-safe dict.
 
     Carries the raw fields plus ``provenance.describe()`` under ``describe``.
     ``None`` passes through as ``None``.
@@ -738,7 +738,7 @@ def _permission_patterns_in_text(text: str) -> List[str]:
     Extract every ``[permissions]`` rule pattern present in *text*.
 
     Builds the ``expected_patterns`` content-loss guard argument for
-    :func:`~toolguard.config_write_guard.verified_write_config`: annotation
+    :func:`~toolguard.configuration.config_write_guard.verified_write_config`: annotation
     touches only ``# toolguard:`` comment lines, so every rule present before
     annotating must still be present in the text actually written.
 
@@ -774,7 +774,7 @@ def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
     before/after text.  Without ``--write`` nothing is touched.  With ``--write``
     it runs the same safety pre-flight as ``--apply`` and REFUSES on blockers,
     leaving the files untouched.  Each write then goes through
-    :func:`~toolguard.config_write_guard.verified_write_config`, which refuses --
+    :func:`~toolguard.configuration.config_write_guard.verified_write_config`, which refuses --
     again leaving the file untouched -- if the annotated text would fail to parse
     or would drop a rule that was there before.
 

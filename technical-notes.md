@@ -77,7 +77,7 @@ anyone cross-referencing against the project's own tracker.
 - [Isolated experiment sandbox (TOO-19)](#isolated-experiment-sandbox-too-19)
 - [Shadowed-hook detection and install hardening (TOO-19)](#shadowed-hook-detection-and-install-hardening-too-19)
   - [Why the two footguns need different flags](#why-the-two-footguns-need-different-flags)
-  - [`toolguard/install_provenance.py` -- placement rationale](#toolguardinstall_provenancepy----placement-rationale)
+  - [`toolguard/install/install_provenance.py` -- placement rationale](#toolguardinstallinstall_provenancepy----placement-rationale)
   - [The clean-tree predicate (stale-install detection)](#the-clean-tree-predicate-stale-install-detection)
   - [The SessionStart gate: only inside toolguard's own repo](#the-sessionstart-gate-only-inside-toolguards-own-repo)
   - [The audit predicate: `PYTHONPATH` content, not process provenance](#the-audit-predicate-pythonpath-content-not-process-provenance)
@@ -248,7 +248,7 @@ The level cascade is orchestrated by
 `permission_resolution.resolve_command_permission`/`resolve_file_path_permission`
 (TOO-45 D1a; fed by
 `Configuration.permission_levels_with_provenance(tool)` through a narrow,
-duck-typed query surface -- the engine module never imports `toolguard.config`
+duck-typed query surface -- the engine module never imports `toolguard.configuration.config`
 itself). Pattern
 MATCHING stays in `permissions.py`/`compound.py` (and the file-path matcher in
 `hook.py`); those provide a per-level
@@ -390,10 +390,10 @@ The **takeover "active" notice** (`session_warnings.issue_takeover_warning`) is
 informational, NOT actionable, so it is **no longer persisted to any log**: it is
 a stderr echo on every invocation, never deduplicated, and (TOO-45 punch-list
 #01, second pass) no longer touches the claim store at all -- periodic
-housekeeping is internal to `toolguard.once_per.OncePer` and runs
+housekeeping is internal to `toolguard.foundation.once_per.OncePer` and runs
 opportunistically as a side effect of any OTHER throttled thing's successful
 claim (e.g. `config_divergence.DIVERGENCE_WARNING`, `auto_migrate
-.AUTO_MIGRATION`), backed by `toolguard.once_per_store`.
+.AUTO_MIGRATION`), backed by `toolguard.foundation.once_per_store`.
 
 ### Conflict logging -- allow-over-deny overrides only
 
@@ -420,13 +420,13 @@ view (per level: `(allow, deny, ToolPatternLayer[])`). The detailed deciders
 `config_types.provenance_for_pattern` maps back to the owning
 `ToolPatternLayer.provenance` for exact file/level precision. (TOO-45 R2d moved
 this off `Configuration` -- it held no configuration state -- to live beside
-`ToolPatternLayer` in `toolguard.config_types`; `permission_resolution.py`
+`ToolPatternLayer` in `toolguard.decision_model.vocabulary`; `permission_resolution.py`
 imports and calls it directly.)
 `resolve_permission_cascade` returns a `RuntimeVerdict`
 (decision, reason, provenance, overrides, ...) -- TOO-45 R1c collapsed the former
 `ResolvedDecision`/`BashResolution`/`FileResolution` into this one type, the single
 runtime verdict every governed-tool resolution returns; see
-`toolguard.config_types.RuntimeVerdict`'s own docstring. For **backward compatibility**,
+`toolguard.decision_model.vocabulary.RuntimeVerdict`'s own docstring. For **backward compatibility**,
 provenance is appended to the reason as a bracketed suffix
 (`_append_provenance` -> `Provenance.describe_brief`), e.g.
 `Command matches allow pattern: git *  [project: /p/.claude/toolguard_hook.toml]`,
@@ -537,8 +537,8 @@ and the old behaviour coincide.
 `no_match_fallback` is "I read this command and no rule covered it";
 `undecidable_fallback` is "I could not safely read this command at all" (foreign
 inline code, heredoc sinks, complex control structures, process substitution --
-see `toolguard.compound`). It is applied as a strictest-wins floor by
-`toolguard.compound._apply_undecidable_floor` against whatever the leaf/segment
+see `toolguard.engine.compound`). It is applied as a strictest-wins floor by
+`toolguard.engine.compound._apply_undecidable_floor` against whatever the leaf/segment
 itself resolved to. Both resolve the same way (top-level key, most-specific
 layer wins, `'ask'`/`'deny'`/`'allow_with_warning'`/`'allow'`, unset or
 unrecognized falls back to `'ask'`) via the shared
@@ -560,7 +560,7 @@ and is not part of `no_match_fallback`'s legacy history.
 `Configuration.governed_tools()` is a UNION across all toolguard_hook layers in
 the hierarchy (de-duplicated, first-occurrence/most-specific-first order),
 defaulting to `('Bash', 'Read', 'Write', 'Edit')`
-(`toolguard.tool_spec.DEFAULT_GOVERNED_TOOLS`) when nothing is configured. It now
+(`toolguard.foundation.tool_spec.DEFAULT_GOVERNED_TOOLS`) when nothing is configured. It now
 resolves over the hierarchical `self.layers` (not the legacy 2-level
 `_load_governed_tools`), so it is consistent with permission and takeover
 resolution and applies under `CLAUDE_SETTINGS_PATH` mode (the explicit source is
@@ -764,7 +764,7 @@ is observation-only (never `decision`/`matched_rule`/`provenance`); a `deny`
 (ordinary or hard-deny) OR an `ask` still decides the unit outright, the same as it would for a
 `'plain'` leaf's own sub-command, and that attribution flows through the unit's own verdict, never
 through the raw audit-trail record: see `UnitVerdict.audit_only` and
-`toolguard.resolve._deciding_sub_match`. Both cases are routed through `_pick_strictest`, the same
+`toolguard.engine.resolve._deciding_sub_match`. Both cases are routed through `_pick_strictest`, the same
 first-match-within-a-tier primitive `_combine_strictest` itself uses to combine a compound's
 units -- not a bespoke, deny-only scan, which would silently downgrade an `ask` reaching no
 branch at all to `allow`.
@@ -1157,7 +1157,7 @@ existing suite; that discovery should be deliberate, not a side effect of a safe
 the installed toolguard package for every process whose working directory happened to be that
 checkout -- including the tool venv's own interpreter running the live PreToolUse hook. The
 hook silently governed real permission decisions with uncommitted, mid-refactor code for weeks
-before this was noticed. `toolguard/install_provenance.py` is the fix's detection layer;
+before this was noticed. `toolguard/install/install_provenance.py` is the fix's detection layer;
 `toolguard/session_start.py` and `toolguard/tools/environment_audit.py` are its consumers.
 User-facing rationale:
 [docs/security.md: The hook can be silently shadowed](docs/security.md#the-hook-can-be-silently-shadowed).
@@ -1170,7 +1170,7 @@ Measured directly, not assumed:
   cause. Unsetting it fixes shadowing with no other change.
 - **`-m` invocation** (`python -m toolguard.hook`): Python ALSO prepends the current working
   directory to `sys.path` for a `-m` invocation, so `-E` (ignore `PYTHONPATH`) alone is
-  insufficient -- `-E -P` is required. Verified: `python -E -P -m toolguard.rule_entry` fails
+  insufficient -- `-E -P` is required. Verified: `python -E -P -m toolguard.decision_model.rule_entry` fails
   with "No module named" (the installed copy is governing, as intended, and this environment
   has none installed) while plain `-m` resolves the working tree instead. `toolguard/hook.py`
   already carries an `if __name__ == "__main__": main()` guard, so `-m toolguard.hook` is a
@@ -1178,20 +1178,20 @@ Measured directly, not assumed:
   [Installer hardening](#installer-hardening-and-its-one-real-risk) below for why the
   registered command uses `-m` at all rather than just hardening the console-script shim.
 
-### `toolguard/install_provenance.py` -- placement rationale
+### `toolguard/install/install_provenance.py` -- placement rationale
 
-A new, small, stdlib-only leaf module rather than a home in `toolguard/path_utils.py` or
+A new, small, stdlib-only leaf module rather than a home in `toolguard/foundation/path_utils.py` or
 `toolguard/tools/`, for two independent reasons:
 
 - **Not `path_utils.py`.** That module's documented charter is project-root MARKER discovery
   (the shared "climb toward home" walk-up config/env loaders and the migration gate use) --
   a different question from "which toolguard package/distribution is this". Folding install
   provenance in would muddy an already-precisely-scoped leaf module for a concern its own
-  callers (`toolguard.config`, `toolguard.env_config`) have no reason to import.
+  callers (`toolguard.configuration.config`, `toolguard.configuration.env_config`) have no reason to import.
 - **Not `toolguard/tools/`.** That package is documented as deliberately segregated from the
   runtime permission-evaluation path (`toolguard/tools/__init__.py`), so that automation
   tooling concerns never bleed into the hook's import graph. `toolguard/session_start.py` --
-  the primary consumer here -- currently imports only `toolguard.config` at module level, and
+  the primary consumer here -- currently imports only `toolguard.configuration.config` at module level, and
   this change keeps it that way: `install_provenance` is a top-level `toolguard/*.py` leaf
   module, importable from both `session_start.py` (session-level, not `tools/`) and
   `toolguard/tools/environment_audit.py` (which, like every other analyser in `tools/`, freely
@@ -1220,8 +1220,8 @@ absolute path), so two directories with the same internal layout hash identicall
 creation order or where they happen to live on disk.
 
 This is intentionally a DIFFERENT comparison from the `toolguard-update-check` console script
-(TOO-16; CLI in `toolguard/update_check.py`, detection/comparison logic in
-`toolguard/install_update.py` since TOO-45 R5c), which compares a local checkout's git HEAD
+(TOO-16; CLI in `toolguard/install/update_check.py`, detection/comparison logic in
+`toolguard/install/install_update.py` since TOO-45 R5c), which compares a local checkout's git HEAD
 against `git ls-remote origin HEAD` -- a git-history freshness question. `stale_install_report()` compares ACTUAL FILE CONTENT currently sitting in
 site-packages against the checkout's current content, which is the only check that has any
 signal for the specific scenario this was built for: a machine deliberately governed by a local,

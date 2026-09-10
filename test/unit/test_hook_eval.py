@@ -21,11 +21,11 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.config_divergence import DivergenceCheckResult
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config_divergence import DivergenceCheckResult
 from toolguard.hook import _resolve_event, _run_divergence_check, main
-from toolguard.invocation import Invocation
-from toolguard.tool_spec import ToolKind, ToolSpec
+from toolguard.foundation.invocation import Invocation
+from toolguard.foundation.tool_spec import ToolKind, ToolSpec
 
 from test.unit._config_isolation import ConfigIsolationMixin, isolate_log_dir_for_module
 
@@ -293,7 +293,7 @@ class TestResolveEventPayloadKeySeam(unittest.TestCase):
     a hardcoded 'file_path' literal -- pinned by a fake registry entry for 'Read'."""
 
     @patch.dict(
-        "toolguard.tool_spec.TOOLS_BY_NAME",
+        "toolguard.foundation.tool_spec.TOOLS_BY_NAME",
         {
             "Read": ToolSpec(
                 name="Read",
@@ -323,7 +323,7 @@ class TestResolveEventPayloadKeySeam(unittest.TestCase):
         self.assertEqual(verdict.matched_rule, "/proj/**")
 
     @patch.dict(
-        "toolguard.tool_spec.TOOLS_BY_NAME",
+        "toolguard.foundation.tool_spec.TOOLS_BY_NAME",
         {
             "Read": ToolSpec(
                 name="Read",
@@ -369,7 +369,9 @@ class TestEvalModeMain(unittest.TestCase):
             patch("sys.stderr", new_callable=StringIO) as mock_stderr,
             patch("toolguard.hook.load_configuration", return_value=config),
             patch("toolguard.hook.log_command") as mock_log,
-            patch("toolguard.hook.run_auto_migration") as mock_mig,
+            patch(
+                "toolguard.configuration.auto_migrate.run_auto_migration"
+            ) as mock_mig,
         ):
             try:
                 main()
@@ -490,7 +492,9 @@ class TestEvalModeMain(unittest.TestCase):
             patch("sys.stdout", new_callable=StringIO) as mock_stdout,
             patch("sys.stderr", new_callable=StringIO) as mock_stderr,
             patch("toolguard.hook.log_command") as mock_log,
-            patch("toolguard.hook.run_auto_migration") as mock_mig,
+            patch(
+                "toolguard.configuration.auto_migrate.run_auto_migration"
+            ) as mock_mig,
         ):
             try:
                 main()
@@ -846,9 +850,14 @@ class TestEvalMatchesLiveHook(unittest.TestCase):
         self.assertEqual(eval_output, live_output)
 
 
-class TestAutoMigrationGate(ConfigIsolationMixin, unittest.TestCase):
-    """The live hook auto-migrates a user's config only when config_sync.auto_migrate
-    says so -- the one place toolguard writes permission config unasked."""
+class TestTheDivergenceCheckNeverMigrates(ConfigIsolationMixin, unittest.TestCase):
+    """
+    The live hook warns about divergence but never migrates (TOO-78).
+
+    Migration reports to stdout, which on this path carries the JSON decision,
+    and it rewrites config files inside a synchronous per-tool-call hook.
+    ``session_start`` owns it; the gate itself is tested in test_auto_migrate.
+    """
 
     def _run_gate(self, auto_migrate, divergent_patterns):
         """Drive _run_divergence_check with the given config_sync setting and
@@ -879,7 +888,9 @@ class TestAutoMigrationGate(ConfigIsolationMixin, unittest.TestCase):
                     divergent_patterns=list(divergent_patterns)
                 ),
             ),
-            patch("toolguard.hook.run_auto_migration") as mock_mig,
+            patch(
+                "toolguard.configuration.auto_migrate.run_auto_migration"
+            ) as mock_mig,
         ):
             invocation = Invocation(
                 tool_name="Bash", tool_input={}, config=config, env_config=env_config
@@ -892,22 +903,26 @@ class TestAutoMigrationGate(ConfigIsolationMixin, unittest.TestCase):
         Given a project with divergent patterns and config_sync.auto_migrate
             left at its default of False
         When the live hook's divergence check runs
-        Then auto-migration is NOT invoked -- toolguard does not rewrite a
-             config the user never asked it to
+        Then auto-migration is NOT invoked
         """
         mock_mig, _project = self._run_gate(False, ["Bash(git push:*)"])
         mock_mig.assert_not_called()
 
-    def test_divergence_with_auto_migrate_migrates_that_project(self):
+    def test_divergence_with_auto_migrate_still_does_not_migrate_here(self):
         """
-        Given a project with divergent patterns and config_sync.auto_migrate
+        Given a project with divergent patterns AND config_sync.auto_migrate
             set to True
         When the live hook's divergence check runs
-        Then auto-migration is invoked for that project root
+        Then auto-migration is still NOT invoked -- the setting enables
+             migration at session start, never on the per-tool-call path
+
+        This is the regression test for the defect that motivated the move:
+        with the migration here, its stdout report preceded the JSON decision,
+        Claude Code could not parse the result, and an unparseable exit-0 hook
+        falls through to native permission handling silently.
         """
-        mock_mig, project = self._run_gate(True, ["Bash(git push:*)"])
-        mock_mig.assert_called_once()
-        self.assertEqual(mock_mig.call_args.args[0], project)
+        mock_mig, _project = self._run_gate(True, ["Bash(git push:*)"])
+        mock_mig.assert_not_called()
 
     def test_no_divergence_does_not_migrate_even_when_enabled(self):
         """

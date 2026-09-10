@@ -22,11 +22,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import ambient, error_reporter
-from toolguard.config import TakeoverConfig
-from toolguard.config_types import RuntimeVerdict
+from toolguard.foundation import ambient
+from toolguard.observability import error_reporter
+from toolguard.configuration.config import TakeoverConfig
+from toolguard.decision_model.vocabulary import RuntimeVerdict
 from toolguard.hook import _finalize_output, _resolve_reporter_log_dir, main
-from toolguard.session_warnings import issue_takeover_warning
+from toolguard.observability.session_warnings import issue_takeover_warning
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 from test.unit.test_hook import _fake_config, _NO_TAKEOVER
@@ -73,14 +74,14 @@ def setUpModule():
     TOOLGUARD_LOG_DIR covers env_config's log resolution, as for test_hook.py.
     Two more are specific to this module:
 
-    `toolguard.log_writer.require_project_root` -- main() resolves a COARSE
+    `toolguard.observability.log_writer.require_project_root` -- main() resolves a COARSE
     log dir (`<project root>/logs`) before env_config exists, and warns to
     stderr when that directory is missing. Unpatched, TestOrdinaryInvocationStderr
     passes only because the developer's own repo happens to have a logs/
     directory: measured 2026-08-13, both its tests fail in a copy of the tree
     without one.
 
-    `toolguard.ambient.home` -- log_crash resolves `~/.toolguard/errors`, so a
+    `toolguard.foundation.ambient.home` -- log_crash resolves `~/.toolguard/errors`, so a
     test driving main() through a crash writes a real crash report into the
     developer's ~/.toolguard/errors.
     """
@@ -92,14 +93,14 @@ def setUpModule():
     _root_tmp_dir = TemporaryDirectory(prefix="too45_hook_reporter_root_")
     (Path(_root_tmp_dir.name) / "logs").mkdir()
     _root_patcher = patch(
-        "toolguard.log_writer.require_project_root",
+        "toolguard.observability.log_writer.require_project_root",
         return_value=Path(_root_tmp_dir.name),
     )
     _root_patcher.start()
 
     _home_tmp_dir = TemporaryDirectory(prefix="too45_hook_reporter_home_")
     _crash_home = Path(_home_tmp_dir.name)
-    _home_patcher = patch("toolguard.ambient.home", _fixture_home)
+    _home_patcher = patch("toolguard.foundation.ambient.home", _fixture_home)
     _home_patcher.start()
 
 
@@ -290,7 +291,7 @@ class TestFaultSurvivesCrashLoggingFailing(unittest.TestCase):
         output = None
         # Patching the accessor, not isolating config: only an ambient.home that
         # raises produces the machine this test is about.
-        with patch("toolguard.ambient.home", _homeless):
+        with patch("toolguard.foundation.ambient.home", _homeless):
             # Without this the fixture cannot produce the negative case.
             with self.assertRaises(RuntimeError):
                 ambient.home()

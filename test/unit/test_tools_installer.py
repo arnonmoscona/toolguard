@@ -22,14 +22,14 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools import installer as installer_module
 from toolguard.tools import self_integrity as self_integrity_module
 from toolguard.tools.installer import main
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
-from toolguard.install_update import InstallInfo, InstallKind
+from toolguard.install.install_update import InstallInfo, InstallKind
 
 _JOURNAL_HEADER_RE = re.compile(
     r"^## \[(\d+)\] \d{4}-\d{2}-\d{2} \d{2}:\d{2} local -- .+$", re.MULTILINE

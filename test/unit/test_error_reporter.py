@@ -1,4 +1,4 @@
-"""Unit tests for toolguard.error_reporter -- which destination each severity reaches."""
+"""Unit tests for toolguard.observability.error_reporter -- which destination each severity reaches."""
 
 import io
 import unittest
@@ -7,8 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import error_log, error_reporter
-from toolguard.error_reporter import Reporter
+from toolguard.observability import error_log, error_reporter
+from toolguard.observability.error_reporter import Reporter
 
 #: The prefix `Reporter._dispatch` prints when the log call itself raised.
 LOG_FAILURE_PREFIX = "Warning: error reporter failed to write log:"
@@ -423,7 +423,7 @@ class TestRoutingLooksUpLogFnByName(unittest.TestCase):
 
     def test_dispatch_calls_whatever_is_currently_bound_on_error_log(self):
         """
-        Given `toolguard.error_log.log_warning` is patched with a stand-in
+        Given `toolguard.observability.error_log.log_warning` is patched with a stand-in
             AFTER `error_reporter` was already imported
         When warning() is called on a Reporter with a resolvable log directory
         Then the stand-in is called, not the original -- proving the

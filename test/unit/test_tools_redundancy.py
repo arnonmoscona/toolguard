@@ -6,8 +6,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import List, Optional
 
-from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.permissions import match_command
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
+from toolguard.engine.permissions import match_command
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.redundancy import (
     _config_without_allow,

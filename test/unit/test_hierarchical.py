@@ -7,10 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.compound import ResolveOneResult, resolve_compound_permission
-from toolguard.config import _discover_levels, load_configuration
-from toolguard.invocation import Invocation
-from toolguard.permission_resolution import resolve_command_permission
+from toolguard.engine.compound import ResolveOneResult, resolve_compound_permission
+from toolguard.configuration.config import _discover_levels, load_configuration
+from toolguard.foundation.invocation import Invocation
+from toolguard.engine.permission_resolution import resolve_command_permission
 
 
 def _write(claude_dir: Path, filename: str, content: str) -> None:
@@ -140,8 +140,12 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
                 root / "home" / ".claude", "toolguard_hook.toml", "permissions = {}\n"
             )
 
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
+            with patch(
+                "toolguard.configuration.config.find_project_root", return_value=project
+            ):
+                with patch(
+                    "toolguard.configuration.config.Path.home", return_value=home
+                ):
                     levels = _discover_levels(project)
 
             paths = [str(path) for path, _s, _f, _spec, _lvl in levels]
@@ -239,7 +243,11 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
 
     def _config(self, *level_specs):
         """Build a Configuration from per-level (allow, deny) Bash pattern pairs, most-specific first."""
-        from toolguard.config import ConfigLayer, Configuration, Provenance
+        from toolguard.configuration.config import (
+            ConfigLayer,
+            Configuration,
+            Provenance,
+        )
         from types import MappingProxyType
 
         layers = []
@@ -482,7 +490,7 @@ class TestRelativeFilePathPatterns(ConfigIsolationMixin, unittest.TestCase):
     def _resolve_read(self, level_name):
         """Resolve a Read of <project_root>/src/x.py against a relative pattern at the given level."""
         from toolguard.hook import resolve_file_path_permission_detailed
-        from toolguard.invocation import Invocation
+        from toolguard.foundation.invocation import Invocation
 
         home, project = self.isolate_config_environment(project_under_home="a/b/proj")
         target = {
@@ -540,7 +548,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         Then the [glob] prefix is preserved and the relative body is anchored to
             the project root
         """
-        from toolguard.file_matching import _anchor_file_pattern
+        from toolguard.engine.file_matching import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -553,7 +561,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         When _anchor_file_pattern runs
         Then the pattern is returned unchanged (never path-joined)
         """
-        from toolguard.file_matching import _anchor_file_pattern
+        from toolguard.engine.file_matching import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -568,7 +576,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
             would normalise it away rather than leave it alone (see
             test_absolute_path_unchanged)
         """
-        from toolguard.file_matching import _anchor_file_pattern
+        from toolguard.engine.file_matching import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -584,7 +592,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         Then the pattern is returned unchanged (tilde expansion happens downstream,
             it is NOT anchored to the project root)
         """
-        from toolguard.file_matching import _anchor_file_pattern
+        from toolguard.engine.file_matching import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -604,7 +612,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
             alone is 'ask' under both implementations.
         """
         from toolguard.hook import resolve_file_path_permission_detailed
-        from toolguard.invocation import Invocation
+        from toolguard.foundation.invocation import Invocation
 
         home, project = self.isolate_config_environment(project_under_home="a/b/proj")
         _write(
@@ -632,7 +640,7 @@ class TestConfigLayerSpecificity(ConfigIsolationMixin, unittest.TestCase):
         When the layer's specificity property is read
         Then it returns 2
         """
-        from toolguard.config import ConfigLayer, Provenance
+        from toolguard.configuration.config import ConfigLayer, Provenance
         from types import MappingProxyType
 
         layer = ConfigLayer(
@@ -710,7 +718,7 @@ class TestMigrationIgnoresEnvOverride(ConfigIsolationMixin, unittest.TestCase):
         Then the resolved toolguard permissions reflect the analysed project,
             not the CLAUDE_SETTINGS_PATH file
         """
-        from toolguard.config_divergence import get_toolguard_permissions
+        from toolguard.configuration.config_divergence import get_toolguard_permissions
 
         home, project = self.isolate_config_environment()
 
@@ -771,7 +779,7 @@ class TestMigrationIgnoresEnvOverride(ConfigIsolationMixin, unittest.TestCase):
             '[permissions]\nallow = ["Bash(project-only:*)"]\n',
         )
 
-        from toolguard.config_divergence import get_toolguard_permissions
+        from toolguard.configuration.config_divergence import get_toolguard_permissions
 
         self.enterContext(
             patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(env_settings)})

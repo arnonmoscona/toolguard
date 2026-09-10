@@ -4,7 +4,7 @@ Redundancy detection for toolguard permission rules.  Two independent strategies
 1. **Static duplicates** -- within one layer's allow (or deny or ask) list for one
    tool, patterns whose bodies normalise to the same string, e.g.
    ``uv run pytest :*`` and ``uv run pytest:*``.  Purely textual; see
-   :func:`_normalised_body` for what normalisation does not preserve.
+   :func:`normalised_body` for what normalisation does not preserve.
 
 2. **Corpus-backed subsumption** -- an allow rule whose removal changes no
    decision anywhere in a harvested command corpus, established by replaying the
@@ -18,9 +18,9 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
-from toolguard.config import Configuration, Provenance, wrap_tool_pattern
-from toolguard.patterns import parse_pattern
-from toolguard.rule_entry import normalize_entry
+from toolguard.configuration.config import Configuration, Provenance, wrap_tool_pattern
+from toolguard.foundation.patterns import parse_pattern
+from toolguard.decision_model.rule_entry import normalize_entry
 from toolguard.tools.config_access import per_layer_rules, with_layer_allow_replaced
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.replay import replay
@@ -64,11 +64,11 @@ class RedundancyFinding:
 # ---------------------------------------------------------------------------
 
 
-def _normalised_body(pattern: str, *, fold_case: bool = True) -> Tuple[str, str]:
+def normalised_body(pattern: str, *, fold_case: bool = True) -> Tuple[str, str]:
     """
     Reduce a pattern to its duplicate-detection key.
 
-    The key pairs the :class:`~toolguard.patterns.PatternType` value
+    The key pairs the :class:`~toolguard.foundation.patterns.PatternType` value
     (``'default'``, ``'regex'``, ``'glob'``, ``'native'``) with the body,
     stripped and, by default, lowercased.  A DEFAULT body is normalised
     further: runs of two or more spaces become one, and whitespace around
@@ -116,7 +116,7 @@ def find_static_duplicates(
     """
     Flag normalised-equal duplicates within a single pattern list.
 
-    Patterns are grouped by :func:`_normalised_body`; every occurrence after the
+    Patterns are grouped by :func:`normalised_body`; every occurrence after the
     first in a group is returned as a ``kind='static'`` finding naming the first
     as its ``covered_by``.
 
@@ -135,7 +135,7 @@ def find_static_duplicates(
     findings: List[RedundancyFinding] = []
 
     for pat in patterns:
-        key = _normalised_body(pat)
+        key = normalised_body(pat)
         if key in seen:
             canonical = seen[key]
             if pat == canonical:

@@ -20,9 +20,9 @@ from types import MappingProxyType
 
 from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.file_matching import check_file_path_hard_deny
-from toolguard.invocation import Invocation
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
+from toolguard.engine.file_matching import check_file_path_hard_deny
+from toolguard.foundation.invocation import Invocation
 from toolguard.tools.recommended_protections import (
     RecommendedProtection,
     required_hard_deny_patterns,

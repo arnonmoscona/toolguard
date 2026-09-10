@@ -1,4 +1,4 @@
-"""Unit tests for toolguard.once_per_store, the shared claim/release/reap store."""
+"""Unit tests for toolguard.foundation.once_per_store, the shared claim/release/reap store."""
 
 import sqlite3
 import unittest
@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from test.unit._subprocess_harness import release_barrier_when_ready, run_child
-from toolguard import once_per_store
-from toolguard.once_per_store import ClaimStatus
+from toolguard.foundation import once_per_store
+from toolguard.foundation.once_per_store import ClaimStatus
 
 
 class _IsolatedStoreMixin:
@@ -271,8 +271,8 @@ class TestClaim(_IsolatedStoreMixin, unittest.TestCase):
                 "import sys, time\n"
                 "from pathlib import Path\n"
                 "from datetime import timedelta\n"
-                "from toolguard import once_per_store\n"
-                "from toolguard.once_per_store import ClaimStatus\n"
+                "from toolguard.foundation import once_per_store\n"
+                "from toolguard.foundation.once_per_store import ClaimStatus\n"
                 "once_per_store._STORE_PATH = Path(sys.argv[1])\n"
                 "barrier = Path(sys.argv[3])\n"
                 "Path(sys.argv[4]).touch()\n"

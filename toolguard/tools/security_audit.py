@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from toolguard.config import Configuration, TakeoverConfig
-from toolguard.constants import BUILTIN_TOOLS
+from toolguard.configuration.config import Configuration, TakeoverConfig
+from toolguard.foundation.constants import BUILTIN_TOOLS
 from toolguard.tools.clarity import find_confusing_interactions
 from toolguard.tools.config_access import (
     audit_context,

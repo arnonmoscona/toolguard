@@ -6,7 +6,7 @@ Tests the bash parser, command extraction, and compound permission logic.
 
 import unittest
 
-from toolguard.compound import (
+from toolguard.engine.compound import (
     ResolveOneResult,
     _accumulate_contexts,
     _apply_undecidable_floor,
@@ -25,7 +25,7 @@ from toolguard.parser.command_extractor import (
     extract_commands,
     parse_command_line,
 )
-from toolguard.permissions import check_permission
+from toolguard.engine.permissions import check_permission
 
 
 class TestBashParser(unittest.TestCase):
@@ -1981,7 +1981,7 @@ def _canned_resolver(mapping):
 
 
 class TestAdditionalContextThreading(unittest.TestCase):
-    """``additionalContext`` threading through ``resolve_compound_permission``/``resolve_compound_permission_detailed`` and ``_combine_strictest``."""
+    """``additionalContext`` threading through ``resolve_compound_permission``/``resolve_compound_permission_detailed`` and ``combine_strictest``."""
 
     def test_single_allowed_leaf_surfaces_its_context(self):
         """

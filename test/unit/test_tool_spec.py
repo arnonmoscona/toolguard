@@ -1,5 +1,5 @@
 """
-Unit tests for toolguard.tool_spec: the registry that decides what a governed
+Unit tests for toolguard.foundation.tool_spec: the registry that decides what a governed
 tool IS.
 
 The registry's content is pinned here, but a name in a set proves nothing on
@@ -19,13 +19,16 @@ import toolguard.api as api_module
 import toolguard.hook as hook_module
 from test.unit._real_log_dir_guard import get_leak_events
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.config_validation import KNOWN_SUPPORTED_TOOLS, validate_permissions
-from toolguard.constants import BUILTIN_TOOLS as CONSTANTS_BUILTIN_TOOLS
-from toolguard.constants import FILE_TOOLS
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config_validation import (
+    KNOWN_SUPPORTED_TOOLS,
+    validate_permissions,
+)
+from toolguard.foundation.constants import BUILTIN_TOOLS as CONSTANTS_BUILTIN_TOOLS
+from toolguard.foundation.constants import FILE_TOOLS
 from toolguard.hook import _resolve_event
-from toolguard.invocation import Invocation
-from toolguard.tool_spec import (
+from toolguard.foundation.invocation import Invocation
+from toolguard.foundation.tool_spec import (
     _REGISTRY,
     _index_by_name,
     BUILTIN_TOOLS,
@@ -386,7 +389,7 @@ class TestPayloadKeyIsWhatConsumersRead(unittest.TestCase):
                 }
             }
         )
-        with patch.dict("toolguard.tool_spec.TOOLS_BY_NAME", rebound):
+        with patch.dict("toolguard.foundation.tool_spec.TOOLS_BY_NAME", rebound):
             for tool in FILE_KIND_NAMES:
                 with self.subTest(tool=tool):
                     self.assertEqual("target_path", payload_key(tool))
@@ -433,7 +436,7 @@ class TestPayloadKeyIsWhatConsumersRead(unittest.TestCase):
             )
         }
         config = _config({"permissions": {"allow": ["Bash(ls:*)"], "deny": []}})
-        with patch.dict("toolguard.tool_spec.TOOLS_BY_NAME", rebound):
+        with patch.dict("toolguard.foundation.tool_spec.TOOLS_BY_NAME", rebound):
             self.assertEqual("shell_input", payload_key("Bash"))
             verdict = _resolve_event(
                 Invocation.for_evaluation(
@@ -564,7 +567,7 @@ class TestPopulationAndTheEmptyRegistry(unittest.TestCase):
         self.assertEqual("deny", before.decision)
         self.assertEqual(COMMAND_RULE_BODY, before.matched_rule)
 
-        with patch("toolguard.config.DEFAULT_GOVERNED_TOOLS", ()):
+        with patch("toolguard.configuration.config.DEFAULT_GOVERNED_TOOLS", ()):
             self.assertEqual((), config.governed_tools())
             verdict = _resolve_event(
                 Invocation.for_evaluation(

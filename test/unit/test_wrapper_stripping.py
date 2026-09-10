@@ -3,22 +3,25 @@ TOO-45 ticket 82: a wrapper native strips before matching Bash rules must not hi
 command under it from either side -- unlike a leading ``NAME=value`` assignment
 (``test_assignment_prefix.py``), wrapper stripping is NOT gated: native's own worked
 example strips a wrapper for an ALLOW rule (``Bash(npm test *)`` matches
-``timeout 30 npm test``). See :data:`toolguard.claude_code_contract.STRIPPED_WRAPPERS`
+``timeout 30 npm test``). See :data:`toolguard.integration.claude_code_contract.STRIPPED_WRAPPERS`
 for the fetched, dated source quote.
 
 This file also proves the pre-existing assignment asymmetry (ticket 77) is unchanged by
-wrapper stripping being added to the same :class:`~toolguard.config_types.CommandSpellings`
+wrapper stripping being added to the same :class:`~toolguard.decision_model.vocabulary.CommandSpellings`
 pair -- the "one structure, two questions" hazard this ticket's brief calls out by name.
 """
 
 import unittest
 
-from toolguard.claude_code_contract import STRIPPED_WRAPPERS
+from toolguard.integration.claude_code_contract import STRIPPED_WRAPPERS
 from toolguard.parser.command_extractor import (
     _strip_wrapper,
     command_spellings,
 )
-from toolguard.permissions import check_permission, decide_command_at_level_detailed
+from toolguard.engine.permissions import (
+    check_permission,
+    decide_command_at_level_detailed,
+)
 
 
 def _decide(command, allow, deny, looked_past=(), ask=None):

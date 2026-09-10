@@ -1,4 +1,4 @@
-"""Unit tests for toolguard.session_warnings: the takeover-mode-active notice."""
+"""Unit tests for toolguard.observability.session_warnings: the takeover-mode-active notice."""
 
 import os
 import unittest
@@ -7,11 +7,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import error_reporter
-from toolguard.config_types import Provenance, TakeoverConfig, TakeoverEnabledConflict
-from toolguard.error_reporter import Reporter
+from toolguard.observability import error_reporter
+from toolguard.decision_model.vocabulary import Provenance
+from toolguard.configuration.config_types import (
+    TakeoverConfig,
+    TakeoverEnabledConflict,
+)
+from toolguard.observability.error_reporter import Reporter
 from toolguard.hook import _announce_takeover_state
-from toolguard.session_warnings import issue_takeover_warning
+from toolguard.observability.session_warnings import issue_takeover_warning
 
 #: The label NOTICE severity's stderr fallback would render if it had one
 #: (see error_reporter._ROUTING) -- it does not, so this must never appear.
@@ -218,13 +222,13 @@ class TestIssueTakeoverWarning(unittest.TestCase):
 
         _log_entry is patched rather than log_warning/log_error/log_conflict
         because those three all reach it by a call-time global lookup, so the
-        patch survives a `from toolguard.error_log import ...` binding taken at
+        patch survives a `from toolguard.observability.error_log import ...` binding taken at
         import time -- which patching the three by name does not.
         """
         with TemporaryDirectory() as tmp:
             reporter = Reporter(log_dir=Path(tmp))
-            with patch("toolguard.error_log._log_entry") as entry:
-                with patch("toolguard.error_log.log_crash") as crash:
+            with patch("toolguard.observability.error_log._log_entry") as entry:
+                with patch("toolguard.observability.error_log.log_crash") as crash:
                     with error_reporter.active(reporter):
                         with patch("sys.stderr", new_callable=StringIO) as err:
                             issue_takeover_warning(enabled=True)

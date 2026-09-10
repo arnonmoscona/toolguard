@@ -17,8 +17,8 @@ from types import MappingProxyType
 from typing import List, Optional, Tuple
 from unittest import mock
 
-from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.config_write_guard import ConfigWriteVerificationError
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config_write_guard import ConfigWriteVerificationError
 from toolguard.tools import decision_ledger
 from toolguard.tools.clarity import InteractionFinding
 from toolguard.tools.consolidate import BroadeningProposal, ConsolidationProposal

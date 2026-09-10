@@ -1,12 +1,12 @@
 """
-Unit tests for toolguard._git -- the shared git-subprocess helper.
+Unit tests for toolguard.install._git -- the shared git-subprocess helper.
 
-Its two callers, :mod:`toolguard.install_update` and
-:mod:`toolguard.install_provenance`, are checked here rather than in their own
+Its two callers, :mod:`toolguard.install.install_update` and
+:mod:`toolguard.install.install_provenance`, are checked here rather than in their own
 test files: the subject is the cross-module delegation, which neither owns.
 
 No test here launches a process: every one patches the ``subprocess.run``
-that :mod:`toolguard._git` calls, or stubs ``run_git`` in a caller's own
+that :mod:`toolguard.install._git` calls, or stubs ``run_git`` in a caller's own
 binding.
 """
 
@@ -19,7 +19,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from toolguard import _git, constants, install_provenance, install_update
+from toolguard.foundation import constants
+from toolguard.install import _git, install_provenance, install_update
 
 
 def _completed(returncode=0, stdout="", stderr=""):
@@ -29,8 +30,8 @@ def _completed(returncode=0, stdout="", stderr=""):
 
 def _constants_imports(module):
     """
-    Map local name -> ``toolguard.constants`` name for *module*'s
-    ``from toolguard.constants import ...`` statements.
+    Map local name -> ``toolguard.foundation.constants`` name for *module*'s
+    ``from toolguard.foundation.constants import ...`` statements.
 
     Read from the source rather than from the runtime binding because the
     binding cannot tell an import from a re-declared literal of the same
@@ -41,18 +42,19 @@ def _constants_imports(module):
     return {
         alias.asname or alias.name: alias.name
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module == "toolguard.constants"
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "toolguard.foundation.constants"
         for alias in node.names
     }
 
 
 class TestSharedConstants(unittest.TestCase):
-    """The distribution name and git timeout come from toolguard.constants."""
+    """The distribution name and git timeout come from toolguard.foundation.constants."""
 
     def test_update_check_dist_name_is_the_shared_constant(self):
         """
         Given install_update.py's distribution_name() fallback
-        When its value and its binding are compared to toolguard.constants.DIST_NAME
+        When its value and its binding are compared to toolguard.foundation.constants.DIST_NAME
         Then it holds that value and is imported from there, not re-declared
         """
         self.assertIs(install_update._DEFAULT_DIST_NAME, constants.DIST_NAME)
@@ -63,7 +65,7 @@ class TestSharedConstants(unittest.TestCase):
     def test_install_provenance_dist_name_is_the_shared_constant(self):
         """
         Given install_provenance.py's default project/distribution name
-        When its value and its binding are compared to toolguard.constants.DIST_NAME
+        When its value and its binding are compared to toolguard.foundation.constants.DIST_NAME
         Then it holds that value and is imported from there, not re-declared
         """
         self.assertIs(install_provenance._DEFAULT_NAME, constants.DIST_NAME)
@@ -73,7 +75,7 @@ class TestSharedConstants(unittest.TestCase):
 
     def test_run_git_default_timeout_is_the_shared_constant(self):
         """
-        Given toolguard._git.run_git's default timeout parameter (keyword-only)
+        Given toolguard.install._git.run_git's default timeout parameter (keyword-only)
         When its value and _git.py's binding are compared to GIT_TIMEOUT_SECONDS
         Then it holds that value and is imported from constants, not re-declared
         """

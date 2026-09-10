@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import List, Optional
 
 from toolguard.api import decide
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.config_access import with_layer_allow_replaced
 from toolguard.tools.consolidate import (
     BroadeningProposal,

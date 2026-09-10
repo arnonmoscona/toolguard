@@ -4,9 +4,9 @@ rule, and must not smuggle one past an allow rule either.
 
 Four layers are covered here because the asymmetry is spread across them: the
 grammar-fed split (:mod:`toolguard.parser.command_extractor`), the matcher that
-consumes it (:mod:`toolguard.permissions`), the configured list of assignment names
-an allow rule may be looked past (:mod:`toolguard.config`), and the live resolver
-that wires the three together (:mod:`toolguard.resolve`).
+consumes it (:mod:`toolguard.engine.permissions`), the configured list of assignment names
+an allow rule may be looked past (:mod:`toolguard.configuration.config`), and the live resolver
+that wires the three together (:mod:`toolguard.engine.resolve`).
 """
 
 import unittest
@@ -14,15 +14,15 @@ from pathlib import Path
 
 from test.unit._config_isolation import ConfigIsolationMixin
 
-from toolguard.config import load_configuration
-from toolguard.invocation import Invocation
+from toolguard.configuration.config import load_configuration
+from toolguard.foundation.invocation import Invocation
 from toolguard.parser.command_extractor import command_spellings, leading_assignments
-from toolguard.permissions import (
+from toolguard.engine.permissions import (
     check_hard_deny,
     check_permission,
     decide_command_at_level_detailed,
 )
-from toolguard.resolve import resolve_bash_permission_detailed
+from toolguard.engine.resolve import resolve_bash_permission_detailed
 
 #: A deny pattern per pattern type, each verified below to match ``rm -rf /tmp/x``
 #: on its own. The bypass this file exists for was invisible to three of the four,

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
-from toolguard.compound import (
+from toolguard.engine.compound import (
     CommandUnit,
     ResolveOneResult,
     _audits_as_one,
@@ -17,11 +17,11 @@ from toolguard.compound import (
     judge_unit,
     resolve_compound_permission_detailed,
 )
-from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.invocation import Invocation
+from toolguard.configuration.config import ConfigLayer, Configuration, Provenance
+from toolguard.foundation.invocation import Invocation
 from toolguard.parser.command_extractor import LeafCommand, UndecidableSegment
-from toolguard.resolve import resolve_bash_permission_detailed
-from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY
+from toolguard.engine.resolve import resolve_bash_permission_detailed
+from toolguard.decision_model.rule_entry import ADDITIONAL_CONTEXT_KEY
 
 
 def _make_config(layers_content):
@@ -268,7 +268,7 @@ class TestSubMatchesCharacterization(unittest.TestCase):
 
 class TestAskFloorFallbackMatrix(unittest.TestCase):
     """Exhaustive {stub decision} x {undecidable_fallback} grid for an ask-floor
-    leaf, against :func:`~toolguard.compound._apply_undecidable_floor`'s table."""
+    leaf, against :func:`~toolguard.engine.compound._apply_undecidable_floor`'s table."""
 
     _FALLBACKS = ("ask", "deny", "allow_with_warning", "allow")
     _LEAF_TEXT = 'python -c "import os"'
@@ -639,9 +639,11 @@ class TestAuditsAsOneIndependentOfKind(unittest.TestCase):
 
         config = _config(fallback="ask")
 
-        with patch("toolguard.resolve.decompose", return_value=[floored_unit]):
+        with patch("toolguard.engine.resolve.decompose", return_value=[floored_unit]):
             as_one = _resolve(config, leaf.text)
-        with patch("toolguard.resolve.decompose", return_value=[decomposed_unit]):
+        with patch(
+            "toolguard.engine.resolve.decompose", return_value=[decomposed_unit]
+        ):
             per_part = _resolve(config, leaf.text)
 
         self.assertEqual(as_one.decision, per_part.decision)

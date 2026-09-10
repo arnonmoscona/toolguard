@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import toolguard.once_per_store as once_per_store
+import toolguard.foundation.once_per_store as once_per_store
 from test.unit._real_log_dir_guard import REAL_LOGS_DIR, get_leak_events, install
 from test.unit._real_once_per_home_guard import (
     REAL_ONCE_PER_DB,
@@ -35,7 +35,7 @@ install_once_per_home_guard()
 # docstring.
 install_relative_receiver_guard()
 
-# toolguard.once_per_store._STORE_PATH is a fixed module-level constant
+# toolguard.foundation.once_per_store._STORE_PATH is a fixed module-level constant
 # (~/.toolguard/once_per.db), unlike logs_dir, which almost every test
 # already passes as a per-test tmp path. check_and_warn_divergence and
 # run_auto_migration key their claims by PROJECT ROOT, not logs_dir, so

@@ -27,9 +27,9 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable, List, Optional, Tuple
 
-from toolguard.config import Configuration, Provenance, TakeoverConfig
-from toolguard.constants import FILE_TOOLS
-from toolguard.patterns import PatternType, parse_pattern
+from toolguard.configuration.config import Configuration, Provenance, TakeoverConfig
+from toolguard.foundation.constants import FILE_TOOLS
+from toolguard.foundation.patterns import PatternType, parse_pattern
 from toolguard.tools.config_access import (
     discover_tools,
     neutralized_by_takeover,
@@ -332,7 +332,7 @@ def _is_unanchored_regex(tool: str, body: str, ptype: PatternType) -> bool:
     """
     Return True when the pattern is a ``[regex]`` allow without a ``^`` anchor.
 
-    :func:`~toolguard.patterns.match_pattern` uses ``re.search``, so an
+    :func:`~toolguard.foundation.patterns.match_pattern` uses ``re.search``, so an
     unanchored body matches anywhere in the command: an allow of ``rm`` also
     allows ``echo "nope no rm here"``. Broader than it looks, hence a finding --
     but ``re.search`` is documented behaviour, not a defect, so the finding is

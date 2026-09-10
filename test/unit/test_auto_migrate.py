@@ -7,17 +7,25 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
-from toolguard import auto_migrate, error_reporter, once_per_store
-from toolguard.auto_migrate import (
+from toolguard.configuration import auto_migrate
+from toolguard.foundation import once_per_store
+from toolguard.observability import error_reporter
+from toolguard.configuration.auto_migrate import (
     AUTO_MIGRATE_LOCK_TIMEOUT_SECONDS,
     AUTO_MIGRATION,
     load_config_sync_settings,
     run_auto_migration,
 )
-from toolguard.once_per_store import ClaimStatus
-from toolguard.permission_migration import MigrationOutcome
+from toolguard.foundation.once_per_store import ClaimStatus
+from toolguard.configuration.config import (
+    ConfigLayer,
+    Configuration,
+    Provenance,
+)
+from toolguard.configuration.permission_migration import MigrationOutcome
 
 from test.unit._config_isolation import ConfigIsolationMixin
 from test.unit._once_per_isolation import IsolatedStoreMixin as _IsolatedStoreMixin
@@ -728,6 +736,95 @@ class TestRunAutoMigrationExceptionSafety(_AutoMigrationFixture, unittest.TestCa
                 run_auto_migration(self.project, self.config_sync, _TAKEOVER_OFF)
 
         self.assertEqual(self.claim_status_now(), ClaimStatus.CLAIMED)
+
+
+class TestRunAutoMigrationForConfig(ConfigIsolationMixin, unittest.TestCase):
+    """
+    The ``config_sync.auto_migrate`` gate, and the ``TakeoverConfig`` -> dict
+    conversion that used to live in the hook (TOO-78). This is the one place
+    toolguard writes permission config unasked, so the gate is tested where it
+    now lives rather than at the caller.
+    """
+
+    @staticmethod
+    def _prov():
+        """A project-level toml provenance for the test layer."""
+        return Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=Path("/fake/0/toolguard_hook.toml"),
+            specificity=0,
+        )
+
+    def _config(self, auto_migrate):
+        """A Configuration whose config_sync carries the given setting."""
+        _home, project = self.isolate_config_environment()
+        content = {
+            "governed_tools": ["Bash"],
+            "permissions": {"allow": ["Bash(ls:*)"], "deny": [], "ask": []},
+            "config_sync": {"auto_migrate": auto_migrate},
+        }
+        config = Configuration(
+            layers=(
+                ConfigLayer(provenance=self._prov(), content=MappingProxyType(content)),
+            ),
+            start_dir=project,
+        )
+        return config, project
+
+    def test_disabled_auto_migrate_does_not_migrate(self):
+        """
+        Given a configuration with config_sync.auto_migrate left at False
+        When run_auto_migration_for_config runs
+        Then no migration is attempted and it reports False -- toolguard does
+             not rewrite a config the user never asked it to
+        """
+        config, project = self._config(False)
+        with patch.object(auto_migrate, "run_auto_migration") as mock_mig:
+            migrated = auto_migrate.run_auto_migration_for_config(project, config)
+        mock_mig.assert_not_called()
+        self.assertFalse(migrated)
+
+    def test_enabled_auto_migrate_migrates_that_project(self):
+        """
+        Given a configuration with config_sync.auto_migrate set to True
+        When run_auto_migration_for_config runs
+        Then migration is invoked once, for that project root
+        """
+        config, project = self._config(True)
+        with patch.object(
+            auto_migrate, "run_auto_migration", return_value=True
+        ) as mock_mig:
+            migrated = auto_migrate.run_auto_migration_for_config(project, config)
+        mock_mig.assert_called_once()
+        self.assertEqual(mock_mig.call_args.args[0], project)
+        self.assertTrue(migrated)
+
+    def test_takeover_settings_reach_the_migration_as_a_plain_dict(self):
+        """
+        Given a configuration with auto_migrate enabled
+        When run_auto_migration_for_config runs
+        Then the migration receives takeover settings as a plain dict carrying
+             every key it consumes
+
+        The conversion moved out of the hook, so nothing outside this layer has
+        to know the legacy dict's shape -- which is exactly the knowledge that
+        would otherwise be duplicated at each caller.
+        """
+        config, project = self._config(True)
+        with patch.object(auto_migrate, "run_auto_migration") as mock_mig:
+            auto_migrate.run_auto_migration_for_config(project, config)
+        takeover_dict = mock_mig.call_args.args[2]
+        self.assertEqual(
+            sorted(takeover_dict),
+            [
+                "additional_ignored_patterns",
+                "enabled",
+                "ignored_allow_patterns",
+                "no_match_fallback",
+            ],
+        )
 
 
 if __name__ == "__main__":

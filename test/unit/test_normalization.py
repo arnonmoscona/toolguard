@@ -7,8 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from toolguard import ambient
-from toolguard.normalization import (
+from toolguard.foundation import ambient
+from toolguard.foundation.normalization import (
     normalize_path,
     expand_tilde,
     expand_tilde_in_command,
@@ -454,7 +454,7 @@ class TestExpandTildeWithNoPasswdModule(unittest.TestCase):
         When expand_tilde is applied to a '~name' path
         Then it is returned unchanged rather than raising
         """
-        with patch("toolguard.normalization.pwd", None):
+        with patch("toolguard.foundation.normalization.pwd", None):
             self.assertEqual(expand_tilde("~someuser/x"), "~someuser/x")
 
 
